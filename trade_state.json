@@ -1,0 +1,19 @@
+{
+    "position_side": "long",
+    "position_amount": 10,
+    "entry_price": 72875.0,
+    "active_sl": 72464.17714285714,
+    "active_tp1": 73597.42285714287,
+    "active_tp2": 74447.35714285716,
+    "open_fee": 3.6437500000000003,
+    "margin_used": 2429.1666666666665,
+    "strategy_name": "PA_V2_市场结构与假突破",
+    "signal_reason": "🟢 模型A: 上升趋势 BOS 回踩确认",
+    "entry_time": "2026-03-05 11:59:39",
+    "has_moved_to_breakeven": false,
+    "has_taken_partial_profit": false,
+    "exchange_order_ids": {
+        "sl_order": "3362531449948397568",
+        "tp_order": "3362531472295649280"
+    }
+}
