@@ -28,7 +28,9 @@
 QuantProject/
 ├── main.py                  # 单用户版入口（兼容保留）
 ├── config.yaml              # 全局配置（策略/风控/品种）
+├── .env.example             # 环境变量模板（复制为 .env 后填写）
 ├── deploy.sh                # 一键部署脚本
+├── startbot.sh / stopbot.sh # 手动启停脚本
 ├── api/                     # FastAPI 后端
 │   ├── server.py            # 应用入口
 │   ├── auth/                # JWT + Fernet 加密
@@ -41,7 +43,7 @@ QuantProject/
 ├── strategy/
 │   ├── base.py              # 策略基类
 │   ├── registry.py          # 策略注册表
-│   └── price_action_v2.py   # PA_V2 策略
+│   └── price_action_v2.py   # PA_V2 策略（见下方说明）
 ├── risk/
 │   └── risk_manager.py      # 连亏熔断 + 日亏熔断
 ├── backtest/
@@ -49,11 +51,41 @@ QuantProject/
 ├── execution/
 │   ├── order_manager.py     # OKX 订单执行
 │   └── db_handler.py        # SQLite 数据库
+├── data/                    # 行情数据缓存
+├── utils/                   # 工具函数
 ├── frontend/                # React 前端
-│   └── src/pages/           # 控制台/交易记录/资产/回测/设置
-└── nginx/
-    └── quantbot.conf        # Nginx 反向代理 + HTTPS 配置
+│   └── src/pages/
+│       ├── AuthPage.jsx     # 登录/注册
+│       ├── Dashboard.jsx    # 控制台（启停 Bot、实时状态）
+│       ├── TradesPage.jsx   # 历史交易记录
+│       ├── BalancePage.jsx  # 资产概览
+│       ├── BacktestPage.jsx # 回测触发与结果展示
+│       └── SettingsPage.jsx # OKX API Key 配置
+├── nginx/
+│   └── quantbot.conf        # Nginx 反向代理 + HTTPS 配置
+└── systemd/                 # systemd 服务配置文件
 ```
+
+> **`trade_state.json`**：运行时自动生成，记录当前持仓状态（仓位方向、入场价、止损止盈订单 ID 等）。无需手动创建，不需要提交到版本库。
+
+## 当前策略：PA_V2 市场结构与假突破
+
+策略文件：`strategy/price_action_v2.py`
+
+基于 **1H K 线**（模拟 4H 级别结构），包含两个交易模型：
+
+### 模型 A：顺势 BOS 回踩
+- 检测价格突破近期摆动高/低点（BOS，结构突破）
+- 在回踩确认位出现**吞没形态**时入场
+- 做多条件：上升趋势 + 回踩前高附近 + 看涨吞没
+- 做空条件：下降趋势 + 回踩前低附近 + 看跌吞没
+
+### 模型 B：逆势假突破（Fakeout / 扫流动性）
+- 检测价格刺破前高/前低后迅速收回（假突破）
+- 结合**波动率过滤**（突破 K 线振幅需超近期均值 1.2 倍）
+- 向上假突破 → 做空；向下假突破 → 做多
+
+**风险管理**：ATR 动态缓冲带 + 固定 RR（TP1=1R，TP2=2.5R）
 
 ## 快速部署（VPS）
 
@@ -77,6 +109,8 @@ cp .env.example .env
 TG_BOT_TOKEN=your_telegram_bot_token
 TG_CHAT_ID=your_chat_id
 ```
+
+`ENCRYPT_KEY` 和 `JWT_SECRET` 由 `deploy.sh` 自动生成，无需手填。
 
 ### 3. 一键部署
 
