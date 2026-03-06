@@ -1,0 +1,19 @@
+[Unit]
+Description=QuantBot - OKX Quant Trading System
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/QuantProject
+ExecStart=/usr/bin/python3 -m uvicorn api.server:app --host 0.0.0.0 --port 8080 --workers 1
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/root/QuantProject/logs/server.log
+StandardError=append:/root/QuantProject/logs/server.log
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

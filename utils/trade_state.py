@@ -1,11 +1,55 @@
+"""
+utils/trade_state.py - 单用户持仓状态管理（SQLite 版，供 main.py 使用）
+
+多用户版状态管理在 core/user_bot/runner.py 中内联实现，不使用本模块。
+避免循环导入：本模块直接使用 sqlite3 + DB_PATH，不导入 db_handler 中的函数。
+"""
+import sqlite3
 import json
 import os
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
-state_file = os.path.join(project_root, 'trade_state.json')
 
-def get_empty_state():
+# 直接定义 DB_PATH，避免与 db_handler 循环引用
+DB_PATH = os.path.join(project_root, "trading_data.db")
+
+# 保留 JSON 文件路径，仅用于首次迁移旧数据
+_LEGACY_JSON = os.path.join(project_root, 'trade_state.json')
+
+
+def _init_state_table():
+    """在 SQLite 中建立 bot_state 表（若不存在）"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+
+def _migrate_legacy():
+    """一次性迁移：如果 trade_state.json 存在，读入并写到 SQLite，然后重命名备份"""
+    if not os.path.exists(_LEGACY_JSON):
+        return
+    try:
+        with open(_LEGACY_JSON, 'r', encoding='utf-8') as f:
+            old_state = json.load(f)
+        save_state(old_state)
+        os.rename(_LEGACY_JSON, _LEGACY_JSON + '.migrated')
+        print("📦 trade_state.json 已自动迁移至 SQLite，原文件重命名为 .migrated")
+    except Exception as e:
+        print(f"⚠️ 迁移 trade_state.json 失败（将继续使用 SQLite 空状态）: {e}")
+
+
+_init_state_table()
+_migrate_legacy()
+
+
+def get_empty_state() -> dict:
     """返回标准化的空状态字典"""
     return {
         "position_side": None,
@@ -22,39 +66,46 @@ def get_empty_state():
         "has_moved_to_breakeven": False,
         "has_taken_partial_profit": False,
         "exchange_order_ids": {
-            "sl_order": None, 
+            "sl_order": None,
             "tp_order": None
         }
     }
 
-def load_state():
-    """读取本地状态。如果没有文件或读取失败，返回空状态"""
-    if not os.path.exists(state_file):
-        return get_empty_state()
+
+def load_state() -> dict:
+    """从 SQLite 读取持仓状态；若无记录则返回空状态"""
     try:
-        with open(state_file, 'r', encoding='utf-8') as f:
-            state = json.load(f)
-            # 做一次简单的字段对齐，防止旧版 JSON 少了新字段
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute(
+            "SELECT value FROM bot_state WHERE key='trade_state'"
+        ).fetchone()
+        conn.close()
+        if row:
+            state = json.loads(row[0])
             empty = get_empty_state()
-            for k in empty.keys():
+            for k, v in empty.items():
                 if k not in state:
-                    state[k] = empty[k]
+                    state[k] = v
             return state
     except Exception as e:
-        print(f"❌ 读取本地状态文件失败: {e}，将返回空状态。")
-        return get_empty_state()
+        print(f"❌ 读取持仓状态失败: {e}，将返回空状态。")
+    return get_empty_state()
 
-def save_state(state):
-    """原子化写入本地状态，防崩溃损坏"""
+
+def save_state(state: dict):
+    """原子化写入持仓状态到 SQLite"""
     try:
-        temp_file = state_file + ".tmp"
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=4, ensure_ascii=False)
-        # 写入完成后瞬间替换原文件，绝对安全
-        os.replace(temp_file, state_file)
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT OR REPLACE INTO bot_state (key, value) VALUES ('trade_state', ?)",
+            (json.dumps(state, ensure_ascii=False),)
+        )
+        conn.commit()
+        conn.close()
     except Exception as e:
-        print(f"❌ 保存本地状态文件失败: {e}")
+        print(f"❌ 保存持仓状态失败: {e}")
+
 
 def clear_state():
-    """清空本地状态（平仓后调用）"""
+    """清空持仓状态（平仓后调用）"""
     save_state(get_empty_state())

@@ -1,0 +1,30 @@
+# config.yaml - 量化 Bot 全局配置
+# 修改此文件后重启 bot 生效，无需改代码
+
+bot:
+  symbol: "BTC/USDT:USDT"
+  timeframe: "1h"
+  leverage: 3
+  contract_size: 0.01
+  taker_fee_rate: 0.0005
+  check_interval: 300          # 每轮扫描间隔（秒）
+
+risk:
+  risk_per_trade_pct: 0.01     # 单笔最大亏损占本金比例
+  max_trade_amount: 1000       # 单笔最大张数（硬性上限）
+  max_consecutive_losses: 3    # 连续亏损 N 次触发熔断
+  daily_loss_limit_pct: 0.05   # 单日亏损超过此比例触发熔断
+
+strategy:
+  name: "PA_V2"                # 注册表中的策略名
+  params:
+    swing_l: 8                 # 摆动高低点窗口（对应 PriceActionV2.__init__ 参数名）
+    atr_period: 14             # ATR 周期
+    buffer_atr_mult: 0.1       # 缓冲区 ATR 倍数（对应 buffer_atr_mult）
+    rr1: 1.0                   # 第一止盈风险回报比
+    rr2: 2.5                   # 第二止盈风险回报比
+
+api:
+  host: "0.0.0.0"
+  port: 8080
+  enable: true
