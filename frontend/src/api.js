@@ -55,12 +55,14 @@ export const dataApi = {
   backtestResult:   () => api.get('/api/data/backtest/result'),
 }
 
-export const tgApi = {
-  save:   (tg_bot_token, tg_chat_id) =>
-    api.post('/api/notify/telegram/save', { tg_bot_token, tg_chat_id }),
-  status: () => api.get('/api/notify/telegram/status'),
-  test:   () => api.post('/api/notify/telegram/test'),
-  clear:  () => api.delete('/api/notify/telegram/clear'),
+export const notifyApi = {
+  saveTg:   (data) => api.post('/api/notify/telegram/save', data),
+  tgStatus: ()     => api.get('/api/notify/telegram/status'),
+  testTg:   ()     => api.post('/api/notify/telegram/test'),
+  clearTg:  ()     => api.delete('/api/notify/telegram/clear'),
 }
+
+// 向后兼容旧名称
+export const tgApi = notifyApi
 
 export default api

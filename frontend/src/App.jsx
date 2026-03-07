@@ -6,18 +6,24 @@ import TradesPage   from './pages/TradesPage'
 import BalancePage  from './pages/BalancePage'
 import BacktestPage from './pages/BacktestPage'
 import SettingsPage from './pages/SettingsPage'
+import {
+  LayoutDashboard, ListOrdered, TrendingUp,
+  FlaskConical, Settings, LogOut, ChevronRight, ChevronLeft,
+  Zap
+} from 'lucide-react'
 
 const PAGES = [
-  { key: 'dashboard', label: '🏠 控制台' },
-  { key: 'trades',    label: '📋 交易记录' },
-  { key: 'balance',   label: '💰 资产曲线' },
-  { key: 'backtest',  label: '🧪 回测' },
-  { key: 'settings',  label: '⚙️ 设置' },
+  { key: 'dashboard', label: '控制台',   Icon: LayoutDashboard },
+  { key: 'trades',    label: '交易记录', Icon: ListOrdered },
+  { key: 'balance',   label: '资产曲线', Icon: TrendingUp },
+  { key: 'backtest',  label: '策略回测', Icon: FlaskConical },
+  { key: 'settings',  label: '设置',     Icon: Settings },
 ]
 
 export default function App() {
   const [username, setUsername] = useState(localStorage.getItem('username') || '')
-  const [page, setPage] = useState('dashboard')
+  const [page, setPage]         = useState('dashboard')
+  const [open, setOpen]         = useState(false)
 
   const logout = () => {
     localStorage.removeItem('token')
@@ -41,27 +47,73 @@ export default function App() {
   }
 
   return (
-    <div className="layout">
+    <div className={`layout${open ? ' sidebar-open' : ''}`}>
+      {/* ── 顶栏 ── */}
+      <header className="topbar">
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="btn-ghost btn-sm"
+          style={{ padding:'5px 8px', marginRight: 4 }}
+          title={open ? '收起侧边栏' : '展开侧边栏'}
+        >
+          {open
+            ? <ChevronLeft size={15} />
+            : <ChevronRight size={15} />
+          }
+        </button>
+
+        <div className="topbar-item">
+          <span className="t-label">系统</span>
+          <span className="t-value" style={{ color: 'var(--blue-light)' }}>QuantBot</span>
+        </div>
+
+        <div className="topbar-divider" />
+
+        <div className="topbar-item">
+          <span className="t-label">OKX 永续</span>
+          <span className="t-value">实时交易</span>
+        </div>
+
+        <div className="topbar-right">
+          <span className="topbar-user">👤 {username}</span>
+          <button className="btn-ghost btn-sm" onClick={logout} title="退出登录">
+            <LogOut size={13} />
+          </button>
+        </div>
+      </header>
+
+      {/* ── 侧边栏 ── */}
       <aside className="sidebar">
-        <div className="logo">⚡ QuantBot</div>
-        {PAGES.map(p => (
-          <a key={p.key} href="#"
-            className={page === p.key ? 'active' : ''}
-            onClick={e => { e.preventDefault(); setPage(p.key) }}>
-            {p.label}
-          </a>
-        ))}
-        <div style={{flex:1}} />
-        <div style={{borderTop:'1px solid var(--border)', paddingTop:16, marginTop:8}}>
-          <div style={{fontSize:12, color:'var(--muted)', marginBottom:8, paddingLeft:8}}>
-            {username}
+        <div className="sidebar-logo">
+          {open ? <><Zap size={15}/> QB</> : 'Q'}
+        </div>
+
+        {PAGES.map(({ key, label, Icon }) => (
+          <div
+            key={key}
+            className={`nav-item${page === key ? ' active' : ''}`}
+            onClick={() => setPage(key)}
+            title={!open ? label : undefined}
+          >
+            <Icon size={16} />
+            <span className="nav-label">{label}</span>
           </div>
-          <a href="#" onClick={e => { e.preventDefault(); logout() }}
-            style={{color:'var(--red)', fontSize:13, paddingLeft:8}}>
-            退出登录
-          </a>
+        ))}
+
+        <div className="sidebar-bottom">
+          <div
+            className="nav-item"
+            onClick={logout}
+            title={!open ? '退出登录' : undefined}
+            style={{ color: 'var(--muted)' }}
+          >
+            <LogOut size={16} />
+            <span className="nav-label" style={{ color: 'var(--red)' }}>退出登录</span>
+          </div>
         </div>
       </aside>
+
+      {/* ── 主内容 ── */}
       <main className="main-content">
         {renderPage()}
       </main>

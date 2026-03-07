@@ -1,250 +1,217 @@
 import { useState, useEffect } from 'react'
-import { keysApi, tgApi } from '../api'
+import { keysApi, notifyApi } from '../api'
+import { KeyRound, Bell, Eye, EyeOff, Check, X, Send, Trash2 } from 'lucide-react'
 
-/* ─── OKX API Key 卡片 ─────────────────────────────────────────────── */
-function OkxKeyCard() {
-  const [form, setForm] = useState({ api_key: '', secret: '', passphrase: '', is_simulate: false })
-  const [status, setStatus] = useState(null)   // {configured, is_simulate, updated_at}
-  const [msg, setMsg] = useState(null)
-  const [loading, setLoading] = useState(false)
+function Section({ icon: Icon, title, children }) {
+  return (
+    <div className="card mb-16">
+      <div className="card-header" style={{ display:'flex', alignItems:'center', gap:6 }}>
+        {Icon && <Icon size={12} />}{title}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+export default function SettingsPage() {
+  // OKX Key
+  const [keyForm, setKeyForm] = useState({ api_key:'', secret:'', passphrase:'', is_simulate: false })
+  const [showSecret, setShowSecret] = useState(false)
+  const [keyStatus, setKeyStatus]   = useState(null)
+  const [keySaving, setKeySaving]   = useState(false)
+  const [keyMsg, setKeyMsg]         = useState('')
+
+  // Telegram
+  const [tgForm, setTgForm]   = useState({ tg_bot_token:'', tg_chat_id:'' })
+  const [tgStatus, setTgStatus] = useState(null)
+  const [tgSaving, setTgSaving] = useState(false)
+  const [tgMsg, setTgMsg]       = useState('')
+  const [testing, setTesting]   = useState(false)
 
   useEffect(() => {
-    keysApi.status().then(r => setStatus(r.data)).catch(() => {})
+    keysApi.status().then(r  => setKeyStatus(r.data))
+    notifyApi.tgStatus().then(r => setTgStatus(r.data))
   }, [])
 
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
-
-  const handleSubmit = async (e) => {
+  const saveKey = async e => {
     e.preventDefault()
-    setMsg(null); setLoading(true)
+    setKeySaving(true); setKeyMsg('')
     try {
-      await keysApi.save(form)
-      setMsg({ ok: true, text: '✅ API Key 已加密保存！' })
-      setForm({ api_key: '', secret: '', passphrase: '', is_simulate: false })
-      keysApi.status().then(r => setStatus(r.data)).catch(() => {})
+      await keysApi.save(keyForm)
+      const r = await keysApi.status(); setKeyStatus(r.data)
+      setKeyMsg('✅ API Key 已保存（AES 加密）')
+      setKeyForm({ api_key:'', secret:'', passphrase:'', is_simulate: false })
     } catch (err) {
-      setMsg({ ok: false, text: err.response?.data?.detail || '保存失败' })
-    } finally {
-      setLoading(false)
-    }
+      setKeyMsg('❌ ' + (err.response?.data?.detail || '保存失败'))
+    } finally { setKeySaving(false) }
+  }
+
+  const saveTg = async e => {
+    e.preventDefault()
+    setTgSaving(true); setTgMsg('')
+    try {
+      await notifyApi.saveTg(tgForm)
+      const r = await notifyApi.tgStatus(); setTgStatus(r.data)
+      setTgMsg('✅ Telegram 配置已保存')
+      setTgForm({ tg_bot_token:'', tg_chat_id:'' })
+    } catch (err) {
+      setTgMsg('❌ ' + (err.response?.data?.detail || '保存失败'))
+    } finally { setTgSaving(false) }
+  }
+
+  const testTg = async () => {
+    setTesting(true); setTgMsg('')
+    try {
+      await notifyApi.testTg()
+      setTgMsg('✅ 测试消息已发送，请查看 Telegram')
+    } catch (err) {
+      setTgMsg('❌ ' + (err.response?.data?.detail || '发送失败'))
+    } finally { setTesting(false) }
+  }
+
+  const clearTg = async () => {
+    try {
+      await notifyApi.clearTg()
+      const r = await notifyApi.tgStatus(); setTgStatus(r.data)
+      setTgMsg('✅ 已清除 Telegram 配置')
+    } catch {}
   }
 
   return (
-    <div className="card" style={{ maxWidth: 540 }}>
-      <div style={{ fontWeight: 600, marginBottom: 16 }}>OKX API Key 配置</div>
-
-      {status?.configured && (
-        <div className="card" style={{
-          background: 'rgba(39,174,96,.08)', borderColor: 'rgba(39,174,96,.3)',
-          marginBottom: 16, fontSize: 13
-        }}>
-          ✅ 已配置 {status.is_simulate ? '（模拟盘）' : '（实盘）'} · 更新于 {status.updated_at}
+    <div style={{ maxWidth: 680 }}>
+      <div className="page-header">
+        <div>
+          <div className="page-title">设置</div>
+          <div className="page-sub">API Key 与通知配置</div>
         </div>
-      )}
-
-      <div className="card" style={{
-        background: 'rgba(210,153,34,.08)', borderColor: 'rgba(210,153,34,.3)',
-        marginBottom: 16, fontSize: 13
-      }}>
-        💡 API Key 在服务端以 AES 加密存储，明文不会被持久化。<br />
-        请确保 Key 开启了「读取」和「交易」权限，并绑定了你的 IP。
       </div>
 
-      <form onSubmit={handleSubmit}>
-        {[
-          ['api_key', 'API Key'],
-          ['secret', 'Secret Key'],
-          ['passphrase', 'Passphrase'],
-        ].map(([k, label]) => (
-          <div className="form-group" key={k}>
-            <label>{label}</label>
+      {/* ── OKX API Key ── */}
+      <Section icon={KeyRound} title="OKX API Key">
+        {keyStatus?.configured && (
+          <div className="alert alert-success mb-12">
+            <Check size={12} style={{ marginRight:6, verticalAlign:'middle' }} />
+            已配置 API Key
+            {keyStatus.is_simulate && <span className="badge badge-yellow" style={{marginLeft:8}}>模拟盘</span>}
+            <span className="col-muted" style={{ marginLeft:8, fontSize:11 }}>更新于 {keyStatus.updated_at}</span>
+          </div>
+        )}
+
+        <form onSubmit={saveKey}>
+          <div className="form-row">
+            <label className="form-label">API Key</label>
             <input
-              type="password"
-              value={form[k]}
-              onChange={e => set(k, e.target.value)}
-              placeholder={`请输入 ${label}`}
-              required
-              autoComplete="off"
+              value={keyForm.api_key}
+              onChange={e => setKeyForm(f => ({...f, api_key: e.target.value}))}
+              placeholder={keyStatus?.configured ? '（已配置，留空则不修改）' : '输入 OKX API Key'}
             />
           </div>
-        ))}
-        <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <input
-            type="checkbox"
-            id="sim"
-            style={{ width: 'auto' }}
-            checked={form.is_simulate}
-            onChange={e => set('is_simulate', e.target.checked)}
-          />
-          <label htmlFor="sim" style={{ margin: 0, cursor: 'pointer' }}>使用模拟盘（Sandbox）</label>
-        </div>
-        <button type="submit" className="btn-primary" disabled={loading} style={{ marginTop: 4 }}>
-          {loading ? '保存中...' : '保存 API Key'}
-        </button>
-        {msg && (
-          <p style={{ marginTop: 12, color: msg.ok ? 'var(--green)' : 'var(--red)', fontSize: 13 }}>
-            {msg.text}
-          </p>
-        )}
-      </form>
-    </div>
-  )
-}
 
-/* ─── Telegram 通知配置卡片 ────────────────────────────────────────── */
-function TelegramCard() {
-  const [form, setForm] = useState({ tg_bot_token: '', tg_chat_id: '' })
-  const [configured, setConfigured] = useState(false)
-  const [saveMsg, setSaveMsg] = useState(null)
-  const [testMsg, setTestMsg] = useState(null)
-  const [saving, setSaving] = useState(false)
-  const [testing, setTesting] = useState(false)
-
-  useEffect(() => {
-    tgApi.status().then(r => setConfigured(r.data.configured)).catch(() => {})
-  }, [])
-
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
-
-  const handleSave = async (e) => {
-    e.preventDefault()
-    setSaveMsg(null); setSaving(true)
-    try {
-      await tgApi.save(form.tg_bot_token, form.tg_chat_id)
-      setSaveMsg({ ok: true, text: '✅ Telegram 配置已保存！' })
-      setConfigured(true)
-      setForm({ tg_bot_token: '', tg_chat_id: '' })
-    } catch (err) {
-      setSaveMsg({ ok: false, text: err.response?.data?.detail || '保存失败' })
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const handleTest = async () => {
-    setTestMsg(null); setTesting(true)
-    try {
-      await tgApi.test()
-      setTestMsg({ ok: true, text: '✅ 测试消息已发送，请查看 Telegram！' })
-    } catch (err) {
-      setTestMsg({ ok: false, text: err.response?.data?.detail || '发送失败，请检查配置' })
-    } finally {
-      setTesting(false)
-    }
-  }
-
-  const handleClear = async () => {
-    if (!window.confirm('确认清除 Telegram 配置？')) return
-    try {
-      await tgApi.clear()
-      setConfigured(false)
-      setSaveMsg({ ok: true, text: '已清除配置' })
-    } catch {
-      setSaveMsg({ ok: false, text: '清除失败' })
-    }
-  }
-
-  return (
-    <div className="card" style={{ maxWidth: 540, marginTop: 24 }}>
-      <div style={{ fontWeight: 600, marginBottom: 16 }}>Telegram 通知配置</div>
-
-      {/* 配置状态标签 */}
-      <div className="card" style={{
-        background: configured ? 'rgba(39,174,96,.08)' : 'rgba(231,76,60,.08)',
-        borderColor: configured ? 'rgba(39,174,96,.3)' : 'rgba(231,76,60,.3)',
-        marginBottom: 16, fontSize: 13,
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-      }}>
-        <span>
-          {configured
-            ? '✅ Telegram 通知已启用，开仓/平仓/熔断均会推送到你的 Bot'
-            : '⚠️ 尚未配置 Telegram，Bot 运行期间不会有消息推送'}
-        </span>
-        {configured && (
-          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-            <button
-              onClick={handleTest}
-              disabled={testing}
-              className="btn-primary"
-              style={{ padding: '4px 12px', fontSize: 12 }}
-            >
-              {testing ? '发送中...' : '📨 测试'}
-            </button>
-            <button
-              onClick={handleClear}
-              style={{
-                padding: '4px 12px', fontSize: 12, cursor: 'pointer',
-                background: 'transparent', border: '1px solid var(--red)',
-                color: 'var(--red)', borderRadius: 6,
-              }}
-            >
-              清除
-            </button>
+          <div className="form-row">
+            <label className="form-label">Secret Key</label>
+            <div style={{ position:'relative' }}>
+              <input
+                type={showSecret ? 'text' : 'password'}
+                value={keyForm.secret}
+                onChange={e => setKeyForm(f => ({...f, secret: e.target.value}))}
+                placeholder={keyStatus?.configured ? '（已配置）' : '输入 Secret Key'}
+                style={{ paddingRight:36 }}
+              />
+              <button type="button"
+                onClick={() => setShowSecret(s => !s)}
+                style={{ position:'absolute', right:8, top:'50%', transform:'translateY(-50%)', background:'none', color:'var(--muted)', padding:4 }}>
+                {showSecret ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
+            </div>
           </div>
-        )}
-      </div>
 
-      {/* 测试结果 */}
-      {testMsg && (
-        <p style={{ marginBottom: 12, color: testMsg.ok ? 'var(--green)' : 'var(--red)', fontSize: 13 }}>
-          {testMsg.text}
-        </p>
-      )}
+          <div className="form-row">
+            <label className="form-label">Passphrase</label>
+            <input
+              type="password"
+              value={keyForm.passphrase}
+              onChange={e => setKeyForm(f => ({...f, passphrase: e.target.value}))}
+              placeholder={keyStatus?.configured ? '（已配置）' : '输入 Passphrase'}
+            />
+          </div>
 
-      {/* 如何获取帮助提示 */}
-      <div className="card" style={{
-        background: 'rgba(52,152,219,.07)', borderColor: 'rgba(52,152,219,.3)',
-        marginBottom: 16, fontSize: 12, lineHeight: 1.7,
-      }}>
-        <b>如何获取 Bot Token 和 Chat ID：</b><br />
-        1. Telegram 搜索 <b>@BotFather</b>，发送 <code>/newbot</code> 创建 Bot，复制 Token<br />
-        2. 搜索 <b>@userinfobot</b>，发送任意消息，获取你的 Chat ID（数字）<br />
-        3. 先向你的 Bot 发一条消息，再填写下方配置
-      </div>
+          <div className="form-row" style={{ flexDirection:'row', alignItems:'center', gap:10 }}>
+            <input
+              type="checkbox"
+              id="simulate"
+              checked={keyForm.is_simulate}
+              onChange={e => setKeyForm(f => ({...f, is_simulate: e.target.checked}))}
+              style={{ width:'auto' }}
+            />
+            <label htmlFor="simulate" style={{ fontSize:13, color:'var(--text)', cursor:'pointer' }}>
+              使用模拟盘（OKX 沙盒环境）
+            </label>
+          </div>
 
-      <form onSubmit={handleSave}>
-        <div className="form-group">
-          <label>Bot Token</label>
-          <input
-            type="password"
-            value={form.tg_bot_token}
-            onChange={e => set('tg_bot_token', e.target.value)}
-            placeholder="例：7412345678:AAGxxxxxxxxxxxx"
-            required
-            autoComplete="off"
-          />
+          {keyMsg && (
+            <div className={`alert ${keyMsg.startsWith('✅') ? 'alert-success' : 'alert-danger'} mb-12`}>
+              {keyMsg}
+            </div>
+          )}
+
+          <button type="submit" className="btn-primary btn-sm" disabled={keySaving}>
+            {keySaving ? <span className="spinner" /> : '保存 API Key'}
+          </button>
+        </form>
+
+        <div className="alert alert-info" style={{ marginTop:14 }}>
+          API Key 使用 Fernet AES 加密存储，明文不落盘，服务端仅在交易时临时解密使用。
         </div>
-        <div className="form-group">
-          <label>Chat ID</label>
-          <input
-            type="text"
-            value={form.tg_chat_id}
-            onChange={e => set('tg_chat_id', e.target.value)}
-            placeholder="例：123456789（你的用户 ID 或群组 ID）"
-            required
-            autoComplete="off"
-          />
-        </div>
-        <button type="submit" className="btn-primary" disabled={saving}>
-          {saving ? '保存中...' : configured ? '更新 Telegram 配置' : '保存 Telegram 配置'}
-        </button>
-        {saveMsg && (
-          <p style={{ marginTop: 12, color: saveMsg.ok ? 'var(--green)' : 'var(--red)', fontSize: 13 }}>
-            {saveMsg.text}
-          </p>
-        )}
-      </form>
-    </div>
-  )
-}
+      </Section>
 
-/* ─── 页面入口 ─────────────────────────────────────────────────────── */
-export default function SettingsPage() {
-  return (
-    <div>
-      <h1 className="page-title">⚙️ 设置</h1>
-      <OkxKeyCard />
-      <TelegramCard />
+      {/* ── Telegram ── */}
+      <Section icon={Bell} title="Telegram 通知">
+        <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:16 }}>
+          {tgStatus?.configured
+            ? <><span className="dot dot-green" /><span style={{ fontSize:12, color:'var(--green)' }}>已配置</span></>
+            : <><span className="dot dot-gray" /><span style={{ fontSize:12, color:'var(--muted)' }}>未配置</span></>
+          }
+          {tgStatus?.configured && (
+            <div style={{ marginLeft:'auto', display:'flex', gap:8 }}>
+              <button className="btn-ghost btn-sm" onClick={testTg} disabled={testing}>
+                {testing ? <span className="spinner" /> : <><Send size={12} style={{marginRight:4}} />发测试消息</>}
+              </button>
+              <button className="btn-ghost btn-sm" onClick={clearTg} style={{ color:'var(--red)' }}>
+                <Trash2 size={12} style={{marginRight:4}} />清除
+              </button>
+            </div>
+          )}
+        </div>
+
+        <form onSubmit={saveTg}>
+          <div className="form-row">
+            <label className="form-label">Bot Token</label>
+            <input
+              value={tgForm.tg_bot_token}
+              onChange={e => setTgForm(f => ({...f, tg_bot_token: e.target.value}))}
+              placeholder={tgStatus?.configured ? '（已配置，留空则不修改）' : '从 @BotFather 获取'}
+            />
+          </div>
+          <div className="form-row">
+            <label className="form-label">Chat ID</label>
+            <input
+              value={tgForm.tg_chat_id}
+              onChange={e => setTgForm(f => ({...f, tg_chat_id: e.target.value}))}
+              placeholder={tgStatus?.configured ? '（已配置）' : '用 @userinfobot 查询'}
+            />
+          </div>
+
+          {tgMsg && (
+            <div className={`alert ${tgMsg.startsWith('✅') ? 'alert-success' : 'alert-danger'} mb-12`}>
+              {tgMsg}
+            </div>
+          )}
+
+          <button type="submit" className="btn-primary btn-sm" disabled={tgSaving}>
+            {tgSaving ? <span className="spinner" /> : '保存 Telegram 配置'}
+          </button>
+        </form>
+      </Section>
     </div>
   )
 }
