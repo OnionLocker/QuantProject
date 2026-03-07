@@ -1,11 +1,14 @@
 """
 api/routes/data.py - 交易记录 / 余额历史 / 策略列表 / 回测
+
+回测参数优先读取用户的 DB 个性化配置，fallback 到 config.yaml。
 """
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
 from api.auth.jwt_handler import get_current_user
-from execution.db_handler import get_conn
+from execution.db_handler import get_conn, load_user_config
+from utils.config_loader import get_config
 from strategy.registry import list_strategies
 from backtest.engine import SUPPORTED_SYMBOLS, SUPPORTED_TIMEFRAMES
 import threading
@@ -59,17 +62,17 @@ def get_backtest_options():
 
 
 class BacktestBody(BaseModel):
-    strategy_name:    str   = "PA_V2"
-    symbol:           str   = "BTC/USDT"
-    timeframe:        str   = "1h"
+    strategy_name:    str   = ""      # 空则读用户DB配置，再 fallback config.yaml
+    symbol:           str   = ""
+    timeframe:        str   = ""
     start_date:       str   = ""
     end_date:         str   = ""
     initial_capital:  float = 5000.0
-    # 执行层参数
-    leverage:         float = 3.0
-    risk_pct:         float = 0.01
-    fee_rate:         float = 0.0005
-    slippage:         float = 0.0002
+    # 执行层参数（0 表示"未指定，用默认"）
+    leverage:         float = 0.0
+    risk_pct:         float = 0.0
+    fee_rate:         float = 0.0
+    slippage:         float = 0.0
     # 策略层参数（key-value，透传给策略 __init__）
     strategy_params:  dict  = {}
 
@@ -87,18 +90,53 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
         try:
             from backtest.engine import run_backtest as _engine
             from strategy.registry import get_strategy
-            strategy = get_strategy(body.strategy_name, **body.strategy_params)
+
+            # ── 参数优先级：请求体 > 用户DB配置 > config.yaml ───────────────
+            global_cfg = get_config()
+            bc = global_cfg.get("bot", {})
+            rc = global_cfg.get("risk", {})
+            sc = global_cfg.get("strategy", {})
+            user_cfg = load_user_config(uid)
+
+            strategy_name = (
+                body.strategy_name.strip() or
+                user_cfg.get("strategy_name") or
+                sc.get("name", "PA_5S")
+            )
+            symbol = (
+                body.symbol.strip() or
+                user_cfg.get("symbol") or
+                bc.get("symbol", "BTC/USDT:USDT")
+            ).split(":")[0]   # 去掉 :USDT 后缀，回测用裸对
+            timeframe = (
+                body.timeframe.strip() or
+                user_cfg.get("timeframe") or
+                bc.get("timeframe", "1h")
+            )
+            leverage = body.leverage or user_cfg.get("leverage") or bc.get("leverage", 3)
+            risk_pct = body.risk_pct or user_cfg.get("risk_pct") or rc.get("risk_per_trade_pct", 0.01)
+            fee_rate = body.fee_rate or bc.get("taker_fee_rate", 0.0005)
+            slippage = body.slippage or 0.0002
+
+            # 策略参数：请求体 > 用户DB > config.yaml
+            strategy_params = (
+                body.strategy_params or
+                user_cfg.get("strategy_params") or
+                sc.get("params", {})
+            )
+
+            strategy = get_strategy(strategy_name, **strategy_params)
             result = _engine(
                 strategy        = strategy,
-                symbol          = body.symbol,
-                timeframe       = body.timeframe,
+                symbol          = symbol,
+                timeframe       = timeframe,
                 start_date      = body.start_date or None,
                 end_date        = body.end_date   or None,
                 initial_capital = body.initial_capital,
-                leverage        = body.leverage,
-                risk_pct        = body.risk_pct,
-                fee_rate        = body.fee_rate,
-                slippage        = body.slippage,
+                leverage        = leverage,
+                risk_pct        = risk_pct,
+                fee_rate        = fee_rate,
+                slippage        = slippage,
                 silent          = True,
             )
             _backtest_results[uid] = result or {"status": "done"}
@@ -108,8 +146,7 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
             _backtest_running[uid] = False
 
     threading.Thread(target=_do, daemon=True).start()
-    return {"status": "running", "strategy": body.strategy_name,
-            "symbol": body.symbol, "timeframe": body.timeframe}
+    return {"status": "running"}
 
 
 @router.get("/backtest/result", summary="获取最近一次回测结果")
