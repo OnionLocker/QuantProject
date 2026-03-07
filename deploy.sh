@@ -6,6 +6,8 @@ set -e
 
 echo "========================================"
 echo "  QuantBot 部署脚本 (Ubuntu)"
+echo "  首次部署：bash deploy.sh"
+echo "  更新代码后重新部署：git pull && bash deploy.sh"
 echo "========================================"
 
 # ── 0. 检测 Python（优先用 python3.11，其次 python3）────────────────────────
@@ -21,8 +23,9 @@ else
 fi
 echo "✅ Python: $($PYTHON --version)"
 
-# ── 1. 确保 logs 目录存在 ────────────────────────────────────────────────────
-mkdir -p logs
+# ── 1. 确保必要目录存在 ───────────────────────────────────────────────────────
+mkdir -p logs data/cache
+echo "✅ 目录已就绪（logs/ data/cache/）"
 
 # ── 2. 安装 Python 依赖 ────────────────────────────────────────────────────────
 echo "📦 安装 Python 依赖..."
@@ -107,13 +110,16 @@ if systemctl is-active --quiet quantbot 2>/dev/null || pgrep -f "uvicorn api.ser
   PUBLIC_IP=$(curl -s --max-time 3 ifconfig.me 2>/dev/null || echo "YOUR_VPS_IP")
   echo ""
   echo "========================================"
-  echo "✅ 部署成功！"
+  echo "✅ 首次部署完成！"
   echo ""
   echo "   🌐 访问地址：http://${PUBLIC_IP}:8080"
-  echo "   📋 查看日志：journalctl -u quantbot -f"
-  echo "              或：tail -f logs/server.log"
-  echo "   🔄 重启服务：systemctl restart quantbot"
-  echo "   🛑 停止服务：systemctl stop quantbot"
+  echo ""
+  echo "   ─── 日常运维命令 ────────────────────"
+  echo "   🚀 启动：bash startbot.sh"
+  echo "   🛑 停止：bash stopbot.sh"
+  echo "   📋 日志：journalctl -u quantbot -f"
+  echo "          或：tail -f logs/server.log"
+  echo "   🔄 重启：systemctl restart quantbot"
   echo "========================================"
 else
   echo ""

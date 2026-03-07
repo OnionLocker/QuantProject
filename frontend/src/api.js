@@ -47,11 +47,20 @@ export const botApi = {
 }
 
 export const dataApi = {
-  trades:          (limit = 50) => api.get(`/api/data/trades?limit=${limit}`),
-  balance:         (limit = 90) => api.get(`/api/data/balance?limit=${limit}`),
-  strategies:      () => api.get('/api/data/strategies'),
-  runBacktest:     (name)  => api.post(`/api/data/backtest/run?strategy_name=${name}`),
-  backtestResult:  () => api.get('/api/data/backtest/result'),
+  trades:           (limit = 50) => api.get(`/api/data/trades?limit=${limit}`),
+  balance:          (limit = 90) => api.get(`/api/data/balance?limit=${limit}`),
+  strategies:       () => api.get('/api/data/strategies'),
+  backtestOptions:  () => api.get('/api/data/backtest/options'),
+  runBacktest:      (params) => api.post('/api/data/backtest/run', params),
+  backtestResult:   () => api.get('/api/data/backtest/result'),
+}
+
+export const tgApi = {
+  save:   (tg_bot_token, tg_chat_id) =>
+    api.post('/api/notify/telegram/save', { tg_bot_token, tg_chat_id }),
+  status: () => api.get('/api/notify/telegram/status'),
+  test:   () => api.post('/api/notify/telegram/test'),
+  clear:  () => api.delete('/api/notify/telegram/clear'),
 }
 
 export default api

@@ -7,9 +7,12 @@ execution/db_handler.py - 数据库初始化 & 工具函数（多用户版，兼
   trade_history    - 历史交易（带 user_id；单用户 user_id=0）
   daily_balance    - 每日余额快照（带 user_id；单用户 user_id=0）
   bot_state        - 持仓状态（带 user_id）
+  risk_state       - 风控状态持久化（连亏次数、日初余额等）
 """
 import sqlite3
 import os
+import time
+import json
 from datetime import datetime
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -18,9 +21,19 @@ DB_PATH = os.path.join(project_root, "trading_data.db")
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """获取数据库连接，启用WAL模式以支持多线程并发读写，写入冲突自动重试。"""
+    for attempt in range(5):
+        try:
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            return conn
+        except sqlite3.OperationalError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2 * (attempt + 1))
 
 
 def init_db():
@@ -78,8 +91,106 @@ def init_db():
         )
     ''')
 
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS risk_state (
+            user_id              INTEGER PRIMARY KEY DEFAULT 0,
+            consecutive_losses   INTEGER DEFAULT 0,
+            daily_start_balance  REAL    DEFAULT NULL,
+            daily_loss_triggered INTEGER DEFAULT 0,
+            last_date            TEXT    DEFAULT NULL,
+            updated_at           TEXT    DEFAULT (datetime('now'))
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id          INTEGER PRIMARY KEY REFERENCES users(id),
+            tg_bot_token_enc TEXT    DEFAULT NULL,
+            tg_chat_id_enc   TEXT    DEFAULT NULL,
+            updated_at       TEXT    DEFAULT (datetime('now'))
+        )
+    ''')
+
     conn.commit()
     conn.close()
+
+
+# ── Telegram 用户配置存取 ──────────────────────────────────────────────────────
+
+def save_tg_config(user_id: int, tg_bot_token_enc: str, tg_chat_id_enc: str):
+    conn = get_conn()
+    try:
+        conn.execute('''
+            INSERT OR REPLACE INTO user_settings
+              (user_id, tg_bot_token_enc, tg_chat_id_enc, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+        ''', (user_id, tg_bot_token_enc, tg_chat_id_enc))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_tg_config(user_id: int) -> dict:
+    """返回加密存储的 token/chat_id，调用方负责解密。未配置则返回空字符串。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT tg_bot_token_enc, tg_chat_id_enc FROM user_settings WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row:
+        return {
+            "tg_bot_token_enc": row["tg_bot_token_enc"] or "",
+            "tg_chat_id_enc":   row["tg_chat_id_enc"]   or "",
+        }
+    return {"tg_bot_token_enc": "", "tg_chat_id_enc": ""}
+
+
+# ── 风控状态持久化 ──────────────────────────────────────────────────────────────
+
+def save_risk_state(user_id: int, consecutive_losses: int,
+                    daily_start_balance, daily_loss_triggered: bool,
+                    last_date: str = None):
+    today = last_date or datetime.now().strftime('%Y-%m-%d')
+    conn = get_conn()
+    try:
+        conn.execute('''
+            INSERT OR REPLACE INTO risk_state
+              (user_id, consecutive_losses, daily_start_balance,
+               daily_loss_triggered, last_date, updated_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+        ''', (user_id, consecutive_losses,
+              daily_start_balance,
+              1 if daily_loss_triggered else 0,
+              today))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_risk_state(user_id: int) -> dict:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM risk_state WHERE user_id=?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row:
+        return {
+            "consecutive_losses":   int(row["consecutive_losses"]),
+            "daily_start_balance":  row["daily_start_balance"],
+            "daily_loss_triggered": bool(row["daily_loss_triggered"]),
+            "last_date":            row["last_date"],
+        }
+    return {
+        "consecutive_losses":   0,
+        "daily_start_balance":  None,
+        "daily_loss_triggered": False,
+        "last_date":            None,
+    }
 
 
 # ── record_balance（单/多用户兼容）────────────────────────────────────────────

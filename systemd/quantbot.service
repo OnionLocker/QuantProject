@@ -1,19 +1,46 @@
 [Unit]
 Description=QuantBot - OKX Quant Trading System
-After=network.target
-StartLimitIntervalSec=60
-StartLimitBurst=3
+Documentation=https://github.com/yourrepo/QuantProject
+After=network-online.target
+Wants=network-online.target
+
+# 无限次重启（不限制启动频率）
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root/QuantProject
-ExecStart=/usr/bin/python3 -m uvicorn api.server:app --host 0.0.0.0 --port 8080 --workers 1
-Restart=on-failure
-RestartSec=10
+
+# 使用绝对路径指向虚拟环境（推荐），若无 venv 则用 /usr/bin/python3
+ExecStart=/usr/bin/python3 -m uvicorn api.server:app \
+    --host 0.0.0.0 \
+    --port 8080 \
+    --workers 1 \
+    --log-level warning
+
+# 崩溃后无条件重启（包括主动 kill 也会重启，stop 通过 systemctl stop 实现）
+Restart=always
+RestartSec=5
+
+# 日志（不截断，追加模式）
 StandardOutput=append:/root/QuantProject/logs/server.log
 StandardError=append:/root/QuantProject/logs/server.log
+
+# 环境变量
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/root/QuantProject
+
+# 资源限制
+LimitNOFILE=65536
+
+# 确保 logs 目录存在
+ExecStartPre=/bin/mkdir -p /root/QuantProject/logs
+
+# 优雅退出：给进程最多 30 秒关闭时间
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target

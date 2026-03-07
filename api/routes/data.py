@@ -2,15 +2,18 @@
 api/routes/data.py - 交易记录 / 余额历史 / 策略列表 / 回测
 """
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional
 from api.auth.jwt_handler import get_current_user
 from execution.db_handler import get_conn
 from strategy.registry import list_strategies
+from backtest.engine import SUPPORTED_SYMBOLS, SUPPORTED_TIMEFRAMES
 import threading
 
 router = APIRouter(prefix="/api/data", tags=["data"])
 
 _backtest_results: dict = {}   # user_id -> result
+_backtest_running: dict = {}   # user_id -> bool
 
 
 @router.get("/trades", summary="我的历史交易")
@@ -24,7 +27,7 @@ def get_trades(limit: int = 50, user=Depends(get_current_user)):
         ).fetchall()
     finally:
         conn.close()
-    keys = ["id","timestamp","symbol","side","action","price","amount","pnl","reason"]
+    keys = ["id", "timestamp", "symbol", "side", "action", "price", "amount", "pnl", "reason"]
     return [dict(zip(keys, r)) for r in rows]
 
 
@@ -46,24 +49,62 @@ def get_strategies():
     return list_strategies()
 
 
-@router.post("/backtest/run", summary="触发回测（异步）")
-def run_backtest(strategy_name: str = "PA_V2", user=Depends(get_current_user)):
+@router.get("/backtest/options", summary="回测可选参数（品种、周期）")
+def get_backtest_options():
+    return {
+        "symbols":    SUPPORTED_SYMBOLS,
+        "timeframes": SUPPORTED_TIMEFRAMES,
+        "strategies": list_strategies(),
+    }
+
+
+class BacktestBody(BaseModel):
+    strategy_name:   str   = "PA_V2"
+    symbol:          str   = "BTC/USDT"
+    timeframe:       str   = "1h"
+    start_date:      str   = ""
+    end_date:        str   = ""
+    initial_capital: float = 5000.0
+
+
+@router.post("/backtest/run", summary="触发回测（后台异步执行）")
+def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
+    uid = user["id"]
+    if _backtest_running.get(uid):
+        return {"status": "already_running"}
+
+    _backtest_running[uid] = True
+    _backtest_results[uid] = {"status": "running"}
+
     def _do():
         try:
             from backtest.engine import run_backtest as _engine
             from strategy.registry import get_strategy
-            result = _engine(get_strategy(strategy_name), silent=True)
-            _backtest_results[user["id"]] = result or {"status": "done"}
+            strategy = get_strategy(body.strategy_name)
+            result = _engine(
+                strategy        = strategy,
+                symbol          = body.symbol,
+                timeframe       = body.timeframe,
+                start_date      = body.start_date or None,
+                end_date        = body.end_date   or None,
+                initial_capital = body.initial_capital,
+                silent          = True,
+            )
+            _backtest_results[uid] = result or {"status": "done"}
         except Exception as e:
-            _backtest_results[user["id"]] = {"status": "error", "error": str(e)}
+            _backtest_results[uid] = {"status": "error", "error": str(e)}
+        finally:
+            _backtest_running[uid] = False
 
     threading.Thread(target=_do, daemon=True).start()
-    return {"status": "running", "strategy": strategy_name}
+    return {"status": "running", "strategy": body.strategy_name,
+            "symbol": body.symbol, "timeframe": body.timeframe}
 
 
 @router.get("/backtest/result", summary="获取最近一次回测结果")
 def get_backtest_result(user=Depends(get_current_user)):
-    result = _backtest_results.get(user["id"])
+    uid = user["id"]
+    result = _backtest_results.get(uid)
     if not result:
         return {"status": "no_result"}
     return result

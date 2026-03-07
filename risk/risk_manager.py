@@ -50,11 +50,14 @@ class RiskManager:
                 print(f"🚨 [风控熔断] 当日亏损达 {daily_loss*100:.1f}%，超过上限 "
                       f"{self.daily_loss_limit_pct*100:.1f}%，已自动停止交易！")
 
-    def reset_daily(self, new_balance: float):
+    def reset_daily(self, new_balance: float = None):
         """每日开始时调用，重置日内状态（连亏不重置，跨日继续累计）"""
-        self._daily_start_balance = new_balance
+        self._daily_start_balance = new_balance  # None 表示等待第一笔交易时再初始化
         self._daily_loss_triggered = False
-        print(f"📅 [风控] 日内状态已重置，起始余额: {new_balance:.2f} U")
+        if new_balance:
+            print(f"📅 [风控] 日内状态已重置，起始余额: {new_balance:.2f} U")
+        else:
+            print("📅 [风控] 日内状态已重置（余额待确认）")
 
     def manual_resume(self):
         """人工确认后恢复交易（熔断后需手动调用）"""

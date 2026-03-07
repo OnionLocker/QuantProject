@@ -3,16 +3,130 @@ import sys
 import os
 import time
 from datetime import datetime, timedelta
-import glob # 👈 新增引入 glob，用于文件匹配查找
+import glob
 
-# 这三行是为了让程序能跨文件夹找到我们刚才写的 core 模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
 from core.okx_client import get_exchange
 
-def fetch_kline_data(symbol='BTC/USDT', timeframe='15m', limit=100):
+# ── 公开行情客户端（不需要 API Key，用于回测下载）──────────────────────────────
+
+def _get_public_exchange():
+    """历史行情数据是公开的，不需要签名，无需读取 .env。"""
+    import ccxt
+    return ccxt.okx({"enableRateLimit": True})
+
+
+# ── 带日期范围的智能缓存下载 ────────────────────────────────────────────────────
+
+CACHE_DIR = os.path.join(project_root, "data", "cache")
+CACHE_TTL_HOURS = 12   # 缓存有效期：12 小时
+
+
+def _cache_path(symbol: str, timeframe: str) -> str:
+    safe = symbol.replace("/", "-").replace(":", "-")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    return os.path.join(CACHE_DIR, f"{safe}_{timeframe}.csv")
+
+
+def _cache_is_fresh(path: str) -> bool:
+    if not os.path.exists(path):
+        return False
+    age = time.time() - os.path.getmtime(path)
+    return age < CACHE_TTL_HOURS * 3600
+
+
+def _download_range(symbol: str, timeframe: str,
+                    since_ms: int, until_ms: int) -> pd.DataFrame:
+    """从 OKX 下载指定时间段的 K 线，无需 API Key。"""
+    ex = _get_public_exchange()
+    all_ohlcv = []
+    cursor = since_ms
+
+    while cursor < until_ms:
+        try:
+            batch = ex.fetch_ohlcv(symbol, timeframe, since=cursor, limit=300)
+            if not batch:
+                break
+            all_ohlcv.extend(batch)
+            last_ts = batch[-1][0]
+            if last_ts >= until_ms or len(batch) < 300:
+                break
+            cursor = last_ts + 1
+            time.sleep(0.12)
+        except Exception as e:
+            print(f"[market_data] 下载中断: {e}，2s 后重试...")
+            time.sleep(2)
+
+    if not all_ohlcv:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_ohlcv,
+                      columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+    df.drop_duplicates(subset=["timestamp"], inplace=True)
+    df.set_index("timestamp", inplace=True)
+    return df
+
+
+def fetch_history_range(symbol: str, timeframe: str,
+                        start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    获取指定交易对、周期、日期范围的历史 K 线。
+    智能缓存策略：
+      - 首次或缓存超过 12 小时 → 重新下载从 start_date 到 end_date 的全量数据并写入缓存
+      - 缓存命中且覆盖所需范围 → 直接读缓存、按日期过滤返回
+    :param symbol:     交易对，如 "BTC/USDT"
+    :param timeframe:  周期，如 "1h" "4h" "1d"
+    :param start_date: 开始日期字符串，如 "2023-01-01"
+    :param end_date:   结束日期字符串，如 "2024-01-01"
+    :return: 按 timestamp 索引的 OHLCV DataFrame
+    """
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt   = datetime.strptime(end_date,   "%Y-%m-%d") + timedelta(days=1)  # 含当天
+    since_ms = int(start_dt.timestamp() * 1000)
+    until_ms = int(end_dt.timestamp()   * 1000)
+
+    cache_file = _cache_path(symbol, timeframe)
+
+    # 检查缓存是否命中且覆盖所需范围
+    if _cache_is_fresh(cache_file):
+        try:
+            cached = pd.read_csv(cache_file, index_col="timestamp", parse_dates=True)
+            if len(cached) > 0:
+                cache_start = cached.index.min()
+                cache_end   = cached.index.max()
+                if cache_start <= start_dt and cache_end >= end_dt - timedelta(days=2):
+                    # 缓存完整覆盖请求范围
+                    mask = (cached.index >= start_dt) & (cached.index < end_dt)
+                    print(f"[market_data] 命中缓存 {os.path.basename(cache_file)}")
+                    return cached[mask]
+        except Exception:
+            pass
+
+    # 缓存不命中或范围不足 → 重新下载
+    print(f"[market_data] 下载 {symbol} {timeframe} [{start_date} → {end_date}]...")
+    df = _download_range(symbol, timeframe, since_ms, until_ms)
+    if df.empty:
+        return df
+
+    # 写入缓存（如已有缓存则合并，扩充覆盖范围）
+    if os.path.exists(cache_file):
+        try:
+            old = pd.read_csv(cache_file, index_col="timestamp", parse_dates=True)
+            df = pd.concat([old, df])
+            df = df[~df.index.duplicated(keep="last")]
+            df.sort_index(inplace=True)
+        except Exception:
+            pass
+    df.to_csv(cache_file)
+    print(f"[market_data] 缓存已更新: {os.path.basename(cache_file)} ({len(df)} 根 K 线)")
+
+    mask = (df.index >= start_dt) & (df.index < end_dt)
+    return df[mask]
     """
     去交易所拿历史 K 线，并整理成整齐的表格
     symbol: 交易对，比如 'BTC/USDT'
