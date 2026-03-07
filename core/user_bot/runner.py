@@ -446,6 +446,16 @@ def run_user_bot(bot_state):
         f"{tag} 风控状态已恢复：连亏={rm._consecutive_losses}次，熔断={rm.is_fused}"
     )
 
+    # ── 弱点修复：启动时主动设置当日起始余额 ─────────────────────────────────
+    # 原先 daily_start_balance 在第一笔亏损时才初始化，若首笔已亏则基准偏低。
+    # 现在在 Bot 启动时立即查询余额作为基准，确保日亏熔断计算准确。
+    try:
+        _startup_balance = _get_swap_usdt(ex)
+        if _startup_balance > 0:
+            rm.set_daily_start_balance(_startup_balance)
+    except Exception:
+        pass
+
     notify = _load_user_notifier(user_id)
     if notify is None:
         notify = send_telegram_msg

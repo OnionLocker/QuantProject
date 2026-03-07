@@ -214,12 +214,25 @@ export default function BacktestPage() {
                   {stratParams.map(p => (
                     <div className="form-row" key={p.key}>
                       <label className="form-label">{p.label}</label>
-                      <input
-                        type="number"
-                        defaultValue={p.default}
-                        min={p.min} max={p.max} step={p.step}
-                        onChange={e => onParamChange(p.key, e.target.value, p.type)}
-                      />
+                      {p.type === 'str' ? (
+                        <select
+                          defaultValue={p.default}
+                          onChange={e => onParamChange(p.key, e.target.value, 'str')}
+                        >
+                          {p.key === 'direction' && <>
+                            <option value="both">双向 (both)</option>
+                            <option value="long">仅做多 (long)</option>
+                            <option value="short">仅做空 (short)</option>
+                          </>}
+                        </select>
+                      ) : (
+                        <input
+                          type="number"
+                          defaultValue={p.default}
+                          min={p.min} max={p.max} step={p.step}
+                          onChange={e => onParamChange(p.key, e.target.value, p.type)}
+                        />
+                      )}
                       {p.tip && <span className="form-hint">{p.tip}</span>}
                     </div>
                   ))}
