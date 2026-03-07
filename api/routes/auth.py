@@ -10,7 +10,8 @@ from execution.db_handler import get_conn
 from api.auth.jwt_handler import create_access_token
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# 使用pbkdf2_sha256替代bcrypt，避免72字节限制
+pwd_ctx = CryptContext(schemes=["pbkdf2_sha256", "bcrypt"], deprecated="auto")
 
 
 class RegisterBody(BaseModel):
