@@ -75,6 +75,12 @@ def _restore_risk_state(user_id: int, rm: RiskManager):
     if data.get("last_date") != today:
         rm._daily_start_balance  = None
         rm._daily_loss_triggered = False
+    # ── Bug fix: 恢复熔断状态 ────────────────────────────────────────────────
+    # 服务重启后仅恢复计数是不够的：若连亏次数已达上限，必须同步恢复熔断开关，
+    # 否则 is_trading_allowed 默认 True，导致重启后熔断失效。
+    if (rm._consecutive_losses >= rm.max_consecutive_losses
+            or rm._daily_loss_triggered):
+        rm.is_trading_allowed = False
 
 
 # ── 持仓状态（per-user，读写 SQLite bot_state 表）────────────────────────────
@@ -648,9 +654,28 @@ def run_user_bot(bot_state):
                     logger.error(f"{tag} 🚨 SL 挂单失败！回滚平仓！")
                     notify(f"🚨 <b>{username}</b> SL 挂单失败，已紧急平仓！")
                     _cancel_all_algo(ex, SYMBOL)
-                    ex.create_order(SYMBOL, "market", close_side, contracts,
-                                    params={"tdMode":"cross","reduceOnly":True,
-                                            **({"posSide":pos_side} if cached_pos_mode=="hedge" else {})})
+                    # ── Bug fix: 紧急平仓加 try/except ──────────────────────
+                    # 若紧急平仓也失败，必须告警并标记持仓状态，防止下轮误重复开仓。
+                    try:
+                        ex.create_order(
+                            SYMBOL, "market", close_side, contracts,
+                            params={
+                                "tdMode": "cross", "reduceOnly": True,
+                                **({"posSide": pos_side} if cached_pos_mode == "hedge" else {}),
+                            }
+                        )
+                        logger.info(f"{tag} 紧急平仓已执行")
+                    except Exception as rollback_err:
+                        logger.error(f"{tag} 🚨🚨 紧急平仓也失败！请立即人工处理！{rollback_err}")
+                        notify(
+                            f"🚨🚨 <b>{username} 紧急平仓失败！</b>\n"
+                            f"SL 挂单失败且平仓指令也报错，请立即人工检查持仓！\n"
+                            f"错误：{str(rollback_err)[:200]}"
+                        )
+                        # 标记为"未知持仓"，阻止下一轮开新仓，等人工确认
+                        state["position_side"]   = "unknown_rollback_failed"
+                        state["position_amount"] = contracts
+                        _save_state(user_id, state)
                     stop_ev.wait(INTERVAL)
                     continue
 
