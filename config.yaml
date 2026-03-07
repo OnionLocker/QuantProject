@@ -16,13 +16,13 @@ risk:
   daily_loss_limit_pct: 0.05   # 单日亏损超过此比例触发熔断
 
 strategy:
-  name: "PA_V2"                # 注册表中的策略名
+  name: "PA_5S"                # 注册表中的策略名
   params:
-    swing_l: 8                 # 摆动高低点窗口（对应 PriceActionV2.__init__ 参数名）
+    rr1: 2.0                   # 止盈倍数
+    ema_period: 20             # EMA 周期
+    trend_bars: 20             # 趋势判断周期
+    spring_bars: 20            # 前低回看周期
     atr_period: 14             # ATR 周期
-    buffer_atr_mult: 0.1       # 缓冲区 ATR 倍数（对应 buffer_atr_mult）
-    rr1: 1.0                   # 第一止盈风险回报比
-    rr2: 2.5                   # 第二止盈风险回报比
 
 api:
   host: "0.0.0.0"

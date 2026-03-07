@@ -59,12 +59,19 @@ def get_backtest_options():
 
 
 class BacktestBody(BaseModel):
-    strategy_name:   str   = "PA_V2"
-    symbol:          str   = "BTC/USDT"
-    timeframe:       str   = "1h"
-    start_date:      str   = ""
-    end_date:        str   = ""
-    initial_capital: float = 5000.0
+    strategy_name:    str   = "PA_V2"
+    symbol:           str   = "BTC/USDT"
+    timeframe:        str   = "1h"
+    start_date:       str   = ""
+    end_date:         str   = ""
+    initial_capital:  float = 5000.0
+    # 执行层参数
+    leverage:         float = 3.0
+    risk_pct:         float = 0.01
+    fee_rate:         float = 0.0005
+    slippage:         float = 0.0002
+    # 策略层参数（key-value，透传给策略 __init__）
+    strategy_params:  dict  = {}
 
 
 @router.post("/backtest/run", summary="触发回测（后台异步执行）")
@@ -80,7 +87,7 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
         try:
             from backtest.engine import run_backtest as _engine
             from strategy.registry import get_strategy
-            strategy = get_strategy(body.strategy_name)
+            strategy = get_strategy(body.strategy_name, **body.strategy_params)
             result = _engine(
                 strategy        = strategy,
                 symbol          = body.symbol,
@@ -88,6 +95,10 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
                 start_date      = body.start_date or None,
                 end_date        = body.end_date   or None,
                 initial_capital = body.initial_capital,
+                leverage        = body.leverage,
+                risk_pct        = body.risk_pct,
+                fee_rate        = body.fee_rate,
+                slippage        = body.slippage,
                 silent          = True,
             )
             _backtest_results[uid] = result or {"status": "done"}

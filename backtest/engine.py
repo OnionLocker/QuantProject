@@ -58,20 +58,29 @@ SUPPORTED_TIMEFRAMES = ["15m", "1h", "4h", "1d"]
 
 def run_backtest(
     strategy=None,
-    symbol: str          = None,
-    timeframe: str       = None,
-    start_date: str      = None,
-    end_date: str        = None,
+    symbol: str            = None,
+    timeframe: str         = None,
+    start_date: str        = None,
+    end_date: str          = None,
     initial_capital: float = 5000.0,
-    silent: bool         = False,
+    # ── 执行层参数（用户可在回测界面调整）────────────────────────────────────
+    leverage:    float     = None,   # 杠杆倍数，None = 读 config.yaml
+    risk_pct:    float     = None,   # 单笔风险占本金比例，None = 读 config.yaml
+    fee_rate:    float     = None,   # 手续费率，None = 读 config.yaml
+    slippage:    float     = None,   # 滑点假设，None = 使用默认值 0.0002
+    silent: bool           = False,
 ) -> dict:
     """
     :param strategy:        策略实例（为 None 时从 config.yaml 自动创建）
-    :param symbol:          交易对，如 "ETH/USDT"（默认 config.yaml）
-    :param timeframe:       K 线周期（默认 config.yaml）
-    :param start_date:      开始日期 "YYYY-MM-DD"（默认 3 年前）
-    :param end_date:        结束日期 "YYYY-MM-DD"（默认今天）
+    :param symbol:          交易对，如 "ETH/USDT"
+    :param timeframe:       K 线周期
+    :param start_date:      开始日期 "YYYY-MM-DD"
+    :param end_date:        结束日期 "YYYY-MM-DD"
     :param initial_capital: 初始资金（U）
+    :param leverage:        杠杆倍数（默认读 config.yaml）
+    :param risk_pct:        单笔风险占本金比例（默认读 config.yaml）
+    :param fee_rate:        手续费率（默认读 config.yaml）
+    :param slippage:        滑点（默认 0.0002）
     :param silent:          True 时抑制终端输出
     :return:                包含统计指标 + equity_curve 的 dict
     """
@@ -94,18 +103,17 @@ def run_backtest(
     try:
         s_dt = datetime.strptime(start_date, "%Y-%m-%d")
         e_dt = datetime.strptime(end_date,   "%Y-%m-%d")
-        if e_dt <= s_dt:
-            return {"status": "error", "error": "结束日期必须晚于开始日期"}
-        if (e_dt - s_dt).days < 30:
-            return {"status": "error", "error": "回测区间不能少于 30 天"}
+        if e_dt < s_dt:
+            return {"status": "error", "error": "结束日期不能早于开始日期"}
     except ValueError as ve:
         return {"status": "error", "error": f"日期格式错误: {ve}"}
 
-    # 确定合约规格（合约张数 = 1 个最小单位）
+    # 执行层参数：用户传入则覆盖默认值
     CONTRACT_SIZE = DEFAULT_CONTRACT
-    LEVERAGE      = DEFAULT_LEVERAGE
-    FEE_RATE      = DEFAULT_FEE_RATE
-    RISK_PCT      = DEFAULT_RISK_PCT
+    LEVERAGE      = float(leverage)  if leverage  is not None else DEFAULT_LEVERAGE
+    FEE_RATE      = float(fee_rate)  if fee_rate  is not None else DEFAULT_FEE_RATE
+    RISK_PCT      = float(risk_pct)  if risk_pct  is not None else DEFAULT_RISK_PCT
+    SLIPPAGE      = float(slippage)  if slippage  is not None else 0.0002
 
     rm = RiskManager(max_trade_amount=DEFAULT_MAX_AMT)
 
@@ -113,6 +121,10 @@ def run_backtest(
     df = fetch_history_range(symbol, timeframe, start_date, end_date)
     if df is None or len(df) == 0:
         return {"status": "error", "error": f"无法获取 {symbol} {timeframe} 历史数据，请稍后重试"}
+
+    # ── 对整个 df 一次性预计算指标，避免逐K线重复 rolling ───────────────────
+    if hasattr(strategy, "precompute"):
+        df = strategy.precompute(df)
 
     # ── 回测主循环 ───────────────────────────────────────────────────────────
     balance         = initial_capital
@@ -135,12 +147,37 @@ def run_backtest(
               f"{start_date} → {end_date} | 初始资金: {initial_capital} U")
         print("-" * 75)
 
-    start_idx = max(51, getattr(strategy, "swing_l", 8) * 2 + 10)
+    start_idx = getattr(strategy, "warmup_bars", 50)
+
+    # K线数不足以覆盖预热期 → 直接返回"无交易"结果，不报错
+    if len(df) <= start_idx:
+        if not silent:
+            print(f"⚠️ K线数({len(df)})不足预热期({start_idx})，本区间无法触发交易。")
+        return {
+            "status":            "done",
+            "strategy":          strategy.name,
+            "symbol":            symbol,
+            "timeframe":         timeframe,
+            "start_date":        start_date,
+            "end_date":          end_date,
+            "initial_capital":   initial_capital,
+            "final_balance":     round(initial_capital, 2),
+            "roi_pct":           0.0,
+            "max_drawdown_pct":  0.0,
+            "win_rate_pct":      0.0,
+            "total_trades":      0,
+            "winning_trades":    0,
+            "losing_trades":     0,
+            "total_fees_paid":   0.0,
+            "equity_curve":      [],
+            "candle_count":      len(df),
+            "note":              f"K线数({len(df)})不足策略预热期({start_idx}根)，区间内无交易触发。",
+        }
+
     _iter = tqdm(range(start_idx, len(df)), desc="⏳ 回测", unit="K", ncols=90,
                  disable=silent)
 
     for i in _iter:
-        historical_slice = df.iloc[:i]
         candle           = df.iloc[i]
         ts               = candle.name
         c_open           = candle["open"]
@@ -148,7 +185,14 @@ def run_backtest(
         c_low            = candle["low"]
         c_close          = candle["close"]
 
-        signal = strategy.generate_signal(historical_slice)
+        # 优先使用预计算行信号，否则降级为滑窗切片
+        if hasattr(strategy, "signal_from_row"):
+            signal = strategy.signal_from_row(df, i)
+        else:
+            SIGNAL_WINDOW = max(200, getattr(strategy, "swing_l", 8) * 6 + 50)
+            win_start = max(0, i - SIGNAL_WINDOW)
+            signal = strategy.generate_signal(df.iloc[win_start:i])
+
         action, reason = signal["action"], signal["reason"]
 
         # 回撤追踪
@@ -301,6 +345,11 @@ def run_backtest(
         "total_fees_paid":   round(total_fees_paid, 2),
         "equity_curve":      equity_curve,
         "candle_count":      len(df),
+        # 执行参数快照（便于结果区展示）
+        "leverage":          LEVERAGE,
+        "risk_pct":          RISK_PCT,
+        "fee_rate":          FEE_RATE,
+        "slippage":          SLIPPAGE,
     }
 
 

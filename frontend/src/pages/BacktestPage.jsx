@@ -93,8 +93,11 @@ function EquityCurve({ data, initialCapital }) {
 
   const xLabels = []
   const step = Math.max(1, Math.floor(data.length / 5))
-  for (let i = 0; i < data.length; i += step)
-    xLabels.push({ x: toX(i), label: data[i].date.slice(5) })
+  for (let i = 0; i < data.length; i += step) {
+    const d = data[i].date          // "2025-03-11"
+    const label = d.slice(2, 4) + '/' + d.slice(5, 7)  // "25/03"
+    xLabels.push({ x: toX(i), label })
+  }
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', maxWidth: W, display: 'block' }}>
@@ -141,20 +144,91 @@ function estimateSec(form) {
   return candles > 10000 ? 90 : candles > 3000 ? 45 : 20
 }
 
+// ── 折叠面板组件 ───────────────────────────────────────────────────────────────
+function Collapse({ title, badge, children }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <button onClick={() => setOpen(o => !o)} style={{
+        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+        background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)',
+        borderRadius: 8, padding: '8px 14px', cursor: 'pointer',
+        color: 'var(--text)', fontSize: 13, fontWeight: 500,
+      }}>
+        <span style={{ flex: 1, textAlign: 'left' }}>{title}</span>
+        {badge && <span style={{
+          fontSize: 11, padding: '2px 8px', borderRadius: 10,
+          background: 'rgba(59,130,246,0.2)', color: 'var(--blue)',
+        }}>{badge}</span>}
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{open ? '▲ 收起' : '▼ 展开'}</span>
+      </button>
+      {open && (
+        <div style={{
+          border: '1px solid rgba(255,255,255,0.08)', borderTop: 'none',
+          borderRadius: '0 0 8px 8px', padding: '16px 14px',
+          background: 'rgba(255,255,255,0.02)',
+        }}>
+          {children}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── 参数输入项 ─────────────────────────────────────────────────────────────────
+function ParamInput({ p, value, onChange, disabled }) {
+  return (
+    <div className='form-group' title={p.tip || ''}>
+      <label style={{ fontSize: 12 }}>
+        {p.label}
+        {p.tip && <span style={{ color: 'var(--muted)', marginLeft: 4, fontWeight: 400 }}>ⓘ</span>}
+      </label>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input
+          type='range'
+          min={p.min} max={p.max} step={p.step}
+          value={value}
+          onChange={e => onChange(p.type === 'int' ? parseInt(e.target.value) : parseFloat(e.target.value))}
+          disabled={disabled}
+          style={{ flex: 1, accentColor: 'var(--blue)' }}
+        />
+        <span style={{
+          minWidth: 42, textAlign: 'right', fontSize: 13,
+          fontWeight: 600, color: 'var(--blue)',
+        }}>{value}</span>
+      </div>
+    </div>
+  )
+}
+
 // ── 主页面 ────────────────────────────────────────────────────────────────────
 export default function BacktestPage() {
   const today       = new Date().toISOString().slice(0, 10)
   const oneYearAgo  = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10)
 
   const [options, setOptions] = useState({ symbols: [], timeframes: [], strategies: [] })
+
+  // 基础表单（strategy_name 在 options 加载后动态修正为第一个可用策略）
   const [form, setForm] = useState({
-    strategy_name:   'PA_V2',
+    strategy_name:   'PA_5S',
     symbol:          'BTC/USDT',
     timeframe:       '1h',
     start_date:      oneYearAgo,
     end_date:        today,
     initial_capital: 5000,
   })
+  // 执行层参数
+  const [execParams, setExecParams] = useState({
+    leverage:  3,
+    risk_pct:  0.01,
+    fee_rate:  0.0005,
+    slippage:  0.0002,
+  })
+  // 策略层参数（动态，跟随所选策略的 PARAMS 元数据）
+  const [strategyParams, setStrategyParams] = useState({})
+
+  const [activeDays, setActiveDays] = useState(365)
+  const [formDirty, setFormDirty] = useState(false)
 
   // 运行状态
   const [running, setRunning]     = useState(false)
@@ -170,16 +244,43 @@ export default function BacktestPage() {
 
   const MAX_WAIT_SEC = 300   // 前端最长等待 5 分钟
 
+  // 当策略切换时，从 options 里取出该策略的 PARAMS 元数据，初始化策略参数默认值
+  const currentStrategyMeta = options.strategies.find(s => s.name === form.strategy_name)
+  const currentStrategyPARAMS = currentStrategyMeta?.params || []
+
+  useEffect(() => {
+    if (currentStrategyPARAMS.length > 0) {
+      setStrategyParams(prev => {
+        const defaults = {}
+        currentStrategyPARAMS.forEach(p => { defaults[p.key] = p.default })
+        // 只填充还没有值的 key，避免覆盖用户已调整的值
+        return { ...defaults, ...prev }
+      })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.strategy_name, options.strategies.length])
+
   // ── 初始化：加载选项 + 恢复运行状态 ────────────────────────────────────────
   useEffect(() => {
-    dataApi.backtestOptions().then(r => setOptions(r.data)).catch(() => {})
+    dataApi.backtestOptions().then(r => {
+      setOptions(r.data)
+      // 如果当前 form 里的策略名在新注册表里不存在，自动修正为第一个可用策略
+      const validNames = (r.data.strategies || []).map(s => s.name)
+      if (validNames.length > 0) {
+        setForm(f => ({
+          ...f,
+          strategy_name: validNames.includes(f.strategy_name) ? f.strategy_name : validNames[0],
+        }))
+      }
+    }).catch(() => {})
 
     // 从 localStorage 恢复上次状态
     const saved = loadLocal()
     if (saved) {
-      if (saved.form)   setForm(saved.form)
-      if (saved.result) setResult(saved.result)
-      if (saved.error)  setError(saved.error)
+      if (saved.form)       setForm(saved.form)
+      if (saved.result)     setResult(saved.result)
+      if (saved.error)      setError(saved.error)
+      if ('activeDays' in saved) setActiveDays(saved.activeDays)
 
       if (saved.running) {
         // 上次离开时还在运行，恢复轮询
@@ -249,7 +350,15 @@ export default function BacktestPage() {
     }, 2500)
   }
 
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  // 修改任意参数时：标记 dirty（需要重新回测），日期类型额外处理快捷按钮高亮
+  const set = (k, v) => {
+    if (k === 'start_date' || k === 'end_date') {
+      if (k === 'end_date' && v > today) v = today
+      setActiveDays(null)
+    }
+    setFormDirty(true)
+    setForm(f => ({ ...f, [k]: v }))
+  }
 
   const startBacktest = async () => {
     stopAll()
@@ -258,12 +367,13 @@ export default function BacktestPage() {
     setRunning(true)
     setElapsed(0)
     setTimedOut(false)
+    setFormDirty(false)
     elapsedRef.current = 0
     const est = estimateSec(form)
     setEstSec(est)
 
     // 持久化"正在运行"状态
-    saveLocal({ form, running: true, startTs: Date.now(), estSec: est })
+    saveLocal({ form, activeDays, running: true, startTs: Date.now(), estSec: est })
 
     try {
       await dataApi.runBacktest({
@@ -273,6 +383,11 @@ export default function BacktestPage() {
         start_date:      form.start_date,
         end_date:        form.end_date,
         initial_capital: Number(form.initial_capital),
+        leverage:        Number(execParams.leverage),
+        risk_pct:        Number(execParams.risk_pct),
+        fee_rate:        Number(execParams.fee_rate),
+        slippage:        Number(execParams.slippage),
+        strategy_params: strategyParams,
       })
       startPolling(0)
     } catch (err) {
@@ -292,6 +407,18 @@ export default function BacktestPage() {
     setElapsed(0)
     setTimedOut(false)
     elapsedRef.current = 0
+    setActiveDays(365)
+    setFormDirty(false)
+    setExecParams({ leverage: 3, risk_pct: 0.01, fee_rate: 0.0005, slippage: 0.0002 })
+    setStrategyParams({})
+    setForm({
+      strategy_name:   options.strategies[0]?.name || 'PA_5S',
+      symbol:          'BTC/USDT',
+      timeframe:       '1h',
+      start_date:      oneYearAgo,
+      end_date:        today,
+      initial_capital: 5000,
+    })
     clearLocal()
   }
 
@@ -372,28 +499,100 @@ export default function BacktestPage() {
         </div>
 
         {/* 快捷日期 */}
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
           {[
             { label: '近 3 个月', days: 90 },
             { label: '近 6 个月', days: 180 },
             { label: '近 1 年',   days: 365 },
             { label: '近 2 年',   days: 730 },
             { label: '近 3 年',   days: 1095 },
-          ].map(({ label, days }) => (
-            <button key={label} disabled={running}
-              onClick={() => {
-                const start = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
-                setForm(f => ({ ...f, start_date: start, end_date: today }))
-              }}
-              style={{
-                padding: '4px 12px', fontSize: 12,
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.15)',
-                color: 'var(--text)', borderRadius: 6,
-              }}
-            >{label}</button>
-          ))}
+          ].map(({ label, days }) => {
+            const isActive = activeDays === days
+            return (
+              <button key={label} disabled={running}
+                onClick={() => {
+                  const start = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
+                  setForm(f => ({ ...f, start_date: start, end_date: today }))
+                  setActiveDays(days)
+                  setFormDirty(true)
+                }}
+                style={{
+                  padding: '4px 12px', fontSize: 12,
+                  background: isActive ? 'var(--blue)' : 'rgba(255,255,255,0.06)',
+                  border: `1px solid ${isActive ? 'var(--blue)' : 'rgba(255,255,255,0.15)'}`,
+                  color: isActive ? '#fff' : 'var(--text)',
+                  borderRadius: 6,
+                  fontWeight: isActive ? 600 : 400,
+                  cursor: running ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.15s',
+                }}
+              >{label}</button>
+            )
+          })}
+          {activeDays === null && (
+            <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 2 }}>自定义区间</span>
+          )}
         </div>
+
+        {/* ── 执行层参数 ─────────────────────────────────────────────── */}
+        <Collapse title="⚙️ 执行参数" badge="杠杆 / 风险 / 费率">
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
+            {[
+              { key: 'leverage',  label: '杠杆倍数',         type: 'int',   min: 1,      max: 20,    step: 1,      tip: '放大收益与风险，建议≤5x' },
+              { key: 'risk_pct',  label: '单笔风险占比',      type: 'float', min: 0.002,  max: 0.05,  step: 0.002,  tip: '每笔交易最多亏掉本金的百分比' },
+              { key: 'fee_rate',  label: '手续费率',          type: 'float', min: 0.0001, max: 0.002, step: 0.0001, tip: 'OKX 合约 Taker 费率约 0.05%' },
+              { key: 'slippage',  label: '滑点',              type: 'float', min: 0,      max: 0.005, step: 0.0001, tip: '成交价与信号价的偏差假设' },
+            ].map(p => {
+              const fmt = v => p.key === 'risk_pct' ? `${(v*100).toFixed(1)}%`
+                             : p.key === 'fee_rate'  ? `${(v*100).toFixed(3)}%`
+                             : p.key === 'slippage'  ? `${(v*100).toFixed(3)}%`
+                             : `${v}x`
+              return (
+                <div className='form-group' key={p.key} title={p.tip}>
+                  <label style={{ fontSize: 12 }}>
+                    {p.label}
+                    <span style={{ color: 'var(--muted)', marginLeft: 6, fontWeight: 400, fontSize: 11 }}>
+                      ({p.tip})
+                    </span>
+                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <input type='range' min={p.min} max={p.max} step={p.step}
+                      value={execParams[p.key]}
+                      onChange={e => {
+                        const v = p.type === 'int' ? parseInt(e.target.value) : parseFloat(e.target.value)
+                        setExecParams(prev => ({ ...prev, [p.key]: v }))
+                        setFormDirty(true)
+                      }}
+                      disabled={running}
+                      style={{ flex: 1, accentColor: 'var(--blue)' }}
+                    />
+                    <span style={{ minWidth: 52, textAlign: 'right', fontSize: 13, fontWeight: 600, color: 'var(--blue)' }}>
+                      {fmt(execParams[p.key])}
+                    </span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </Collapse>
+
+        {/* ── 策略层参数（动态） ──────────────────────────────────────── */}
+        {currentStrategyPARAMS.length > 0 && (
+          <Collapse title={`🎯 策略参数（${form.strategy_name}）`} badge={`${currentStrategyPARAMS.length} 项`}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
+              {currentStrategyPARAMS.map(p => (
+                <ParamInput key={p.key} p={p}
+                  value={strategyParams[p.key] ?? p.default}
+                  onChange={v => {
+                    setStrategyParams(prev => ({ ...prev, [p.key]: v }))
+                    setFormDirty(true)
+                  }}
+                  disabled={running}
+                />
+              ))}
+            </div>
+          </Collapse>
+        )}
 
         {/* 按钮行 */}
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -432,6 +631,20 @@ export default function BacktestPage() {
         )}
       </div>
 
+      {/* ── 参数已修改提示 ──────────────────────────────────────────── */}
+      {result && formDirty && !running && (
+        <div style={{
+          maxWidth: 720, marginBottom: 12,
+          padding: '10px 16px', borderRadius: 8,
+          background: 'rgba(255,193,7,0.08)',
+          border: '1px solid rgba(255,193,7,0.3)',
+          color: '#f39c12', fontSize: 13,
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          ⚠️ 参数已修改，以下为<strong>上一次</strong>的回测结果，点击「开始回测」查看新结果
+        </div>
+      )}
+
       {/* ── 回测结果区 ──────────────────────────────────────────────── */}
       {result && result.status === 'done' && (() => {
         const r = result
@@ -441,31 +654,59 @@ export default function BacktestPage() {
             <div style={{ fontWeight: 600, marginBottom: 4 }}>
               📊 {r.strategy} — {r.symbol} {r.timeframe}
             </div>
-            <div style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 20 }}>
+            <div style={{ color: 'var(--muted)', fontSize: 13, marginBottom: r.note ? 12 : 20 }}>
               {r.start_date} → {r.end_date} · {r.candle_count} 根 K 线 · 初始资金 {r.initial_capital} U
+              {r.leverage && (
+                <span style={{ marginLeft: 8 }}>
+                  · {r.leverage}x 杠杆 · 风险 {(r.risk_pct*100).toFixed(1)}%/笔
+                </span>
+              )}
             </div>
 
-            <div className='grid-4' style={{ marginBottom: 20 }}>
-              <StatCard label='最终余额'  value={`${r.final_balance} U`} />
-              <StatCard label='净收益率'
-                        value={`${roiSign}${r.roi_pct}%`}
-                        color={roiColor(r)} />
-              <StatCard label='最大回撤'
-                        value={`${r.max_drawdown_pct}%`}
-                        color='#f39c12' />
-              <StatCard label='总手续费'  value={`${r.total_fees_paid} U`} />
-            </div>
+            {/* 无交易提示 */}
+            {r.note && (
+              <div style={{
+                marginBottom: 20, padding: '10px 14px', borderRadius: 8,
+                background: 'rgba(255,193,7,0.08)',
+                border: '1px solid rgba(255,193,7,0.25)',
+                color: '#f39c12', fontSize: 13,
+              }}>
+                ⚠️ {r.note}
+              </div>
+            )}
 
-            <div className='grid-4' style={{ marginBottom: 20 }}>
-              <StatCard label='总交易次数' value={r.total_trades} />
-              <StatCard label='盈利次数'
-                        value={<span className='tag-green'>{r.winning_trades}</span>} />
-              <StatCard label='亏损次数'
-                        value={<span className='tag-red'>{r.losing_trades}</span>} />
-              <StatCard label='胜率'
-                        value={`${r.win_rate_pct}%`}
-                        color={r.win_rate_pct >= 50 ? 'var(--green)' : 'var(--yellow)'} />
-            </div>
+            {r.total_trades === 0 ? (
+              <div style={{
+                padding: '28px 0', textAlign: 'center',
+                color: 'var(--muted)', fontSize: 14,
+              }}>
+                📭 本区间内策略未触发任何交易
+              </div>
+            ) : (
+              <>
+                <div className='grid-4' style={{ marginBottom: 20 }}>
+                  <StatCard label='最终余额'  value={`${r.final_balance} U`} />
+                  <StatCard label='净收益率'
+                            value={`${roiSign}${r.roi_pct}%`}
+                            color={roiColor(r)} />
+                  <StatCard label='最大回撤'
+                            value={`${r.max_drawdown_pct}%`}
+                            color='#f39c12' />
+                  <StatCard label='总手续费'  value={`${r.total_fees_paid} U`} />
+                </div>
+
+                <div className='grid-4' style={{ marginBottom: 20 }}>
+                  <StatCard label='总交易次数' value={r.total_trades} />
+                  <StatCard label='盈利次数'
+                            value={<span className='tag-green'>{r.winning_trades}</span>} />
+                  <StatCard label='亏损次数'
+                            value={<span className='tag-red'>{r.losing_trades}</span>} />
+                  <StatCard label='胜率'
+                            value={`${r.win_rate_pct}%`}
+                            color={r.win_rate_pct >= 50 ? 'var(--green)' : 'var(--yellow)'} />
+                </div>
+              </>
+            )}
 
             {r.equity_curve?.length > 1 && (
               <>
