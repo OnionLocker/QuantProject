@@ -16,41 +16,42 @@ function clearLocal() {
 }
 
 // ── 进度条组件 ────────────────────────────────────────────────────────────────
-function ProgressBar({ elapsedSec, estimatedSec }) {
-  // 根据预估时间算"伪进度"，到 90% 后停住等结果
+function ProgressBar({ elapsedSec, estimatedSec, timedOut }) {
+  // 根据预估时间算"伪进度"，到 90% 后停住等结果；超时后变红显示 100%
   const raw = estimatedSec > 0 ? (elapsedSec / estimatedSec) * 100 : 0
-  const pct = Math.min(raw, 92)
+  const pct = timedOut ? 100 : Math.min(raw, 92)
+  const barColor = timedOut ? 'var(--red)' : 'var(--blue)'
 
   return (
     <div style={{ marginTop: 14 }}>
-      {/* 轨道 */}
       <div style={{
         height: 6, borderRadius: 3,
         background: 'rgba(255,255,255,0.08)',
         overflow: 'hidden', position: 'relative',
       }}>
-        {/* 已完成部分 */}
         <div style={{
           height: '100%',
           width: `${pct}%`,
-          background: 'var(--blue)',
+          background: barColor,
           borderRadius: 3,
           transition: 'width 1s linear',
         }} />
-        {/* 扫光动画（叠加在上方） */}
-        <div style={{
-          position: 'absolute', top: 0, left: 0,
-          height: '100%', width: '100%',
-          background: 'linear-gradient(90deg,transparent 0%,rgba(255,255,255,0.18) 50%,transparent 100%)',
-          animation: 'shimmer 1.6s infinite',
-        }} />
+        {!timedOut && (
+          <div style={{
+            position: 'absolute', top: 0, left: 0,
+            height: '100%', width: '100%',
+            background: 'linear-gradient(90deg,transparent 0%,rgba(255,255,255,0.18) 50%,transparent 100%)',
+            animation: 'shimmer 1.6s infinite',
+          }} />
+        )}
       </div>
 
       <div style={{
         display: 'flex', justifyContent: 'space-between',
-        marginTop: 6, fontSize: 12, color: 'var(--muted)',
+        marginTop: 6, fontSize: 12,
+        color: timedOut ? 'var(--red)' : 'var(--muted)',
       }}>
-        <span>⏳ 计算中... 已用时 {elapsedSec}s</span>
+        <span>{timedOut ? '⚠️ 超时' : `⏳ 计算中... 已用时 ${elapsedSec}s`}</span>
         <span>{Math.round(pct)}%</span>
       </div>
     </div>
@@ -161,9 +162,13 @@ export default function BacktestPage() {
   const [estSec, setEstSec]       = useState(45)
   const [result, setResult]       = useState(null)
   const [error, setError]         = useState(null)
+  const [timedOut, setTimedOut]   = useState(false)   // 超时标志
 
-  const pollingRef = useRef(null)
-  const timerRef   = useRef(null)
+  const pollingRef  = useRef(null)
+  const timerRef    = useRef(null)
+  const elapsedRef  = useRef(0)    // 用 ref 在 interval 回调里读取最新值
+
+  const MAX_WAIT_SEC = 300   // 前端最长等待 5 分钟
 
   // ── 初始化：加载选项 + 恢复运行状态 ────────────────────────────────────────
   useEffect(() => {
@@ -179,6 +184,7 @@ export default function BacktestPage() {
       if (saved.running) {
         // 上次离开时还在运行，恢复轮询
         const alreadyElapsed = Math.round((Date.now() - saved.startTs) / 1000)
+        elapsedRef.current = alreadyElapsed
         setElapsed(alreadyElapsed)
         setEstSec(saved.estSec || 45)
         setRunning(true)
@@ -198,9 +204,11 @@ export default function BacktestPage() {
   function startTimer(initSec = 0) {
     if (timerRef.current) clearInterval(timerRef.current)
     let t = initSec
+    elapsedRef.current = t
     setElapsed(t)
     timerRef.current = setInterval(() => {
       t++
+      elapsedRef.current = t
       setElapsed(t)
     }, 1000)
   }
@@ -209,6 +217,16 @@ export default function BacktestPage() {
     startTimer(initElapsed)
     if (pollingRef.current) clearInterval(pollingRef.current)
     pollingRef.current = setInterval(async () => {
+      // 前端超时保护：超过 MAX_WAIT_SEC 秒仍未结束，主动报错
+      if (elapsedRef.current >= MAX_WAIT_SEC) {
+        stopAll()
+        const msg = `回测超时（等待超过 ${MAX_WAIT_SEC}s），服务端可能已报错。请查看服务日志或重试。`
+        setError(msg)
+        setRunning(false)
+        setTimedOut(true)
+        saveLocal({ form, error: msg, running: false })
+        return
+      }
       try {
         const r = await dataApi.backtestResult()
         const d = r.data
@@ -216,6 +234,7 @@ export default function BacktestPage() {
           stopAll()
           setResult(d)
           setRunning(false)
+          setTimedOut(false)
           saveLocal({ form, result: d, running: false })
         } else if (d?.status === 'error') {
           stopAll()
@@ -238,6 +257,8 @@ export default function BacktestPage() {
     setError(null)
     setRunning(true)
     setElapsed(0)
+    setTimedOut(false)
+    elapsedRef.current = 0
     const est = estimateSec(form)
     setEstSec(est)
 
@@ -269,6 +290,8 @@ export default function BacktestPage() {
     setResult(null)
     setError(null)
     setElapsed(0)
+    setTimedOut(false)
+    elapsedRef.current = 0
     clearLocal()
   }
 
@@ -392,8 +415,8 @@ export default function BacktestPage() {
         </div>
 
         {/* 进度条 */}
-        {running && (
-          <ProgressBar elapsedSec={elapsedSec} estimatedSec={estSec} />
+        {(running || timedOut) && (
+          <ProgressBar elapsedSec={elapsedSec} estimatedSec={estSec} timedOut={timedOut} />
         )}
 
         {/* 提示文字（运行中） */}

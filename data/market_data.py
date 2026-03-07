@@ -44,10 +44,20 @@ def _download_range(symbol: str, timeframe: str,
     ex = _get_public_exchange()
     all_ohlcv = []
     cursor = since_ms
+    consecutive_errors = 0
+    MAX_ERRORS   = 5     # 连续报错超过此次数直接放弃
+    TIMEOUT_SEC  = 120   # 单次下载总超时（秒）
+    deadline     = time.time() + TIMEOUT_SEC
 
     while cursor < until_ms:
+        if time.time() > deadline:
+            raise TimeoutError(
+                f"数据下载超时（>{TIMEOUT_SEC}s），已获取 {len(all_ohlcv)} 根 K 线。"
+                "请检查网络或稍后重试。"
+            )
         try:
             batch = ex.fetch_ohlcv(symbol, timeframe, since=cursor, limit=300)
+            consecutive_errors = 0   # 成功则重置错误计数
             if not batch:
                 break
             all_ohlcv.extend(batch)
@@ -57,7 +67,13 @@ def _download_range(symbol: str, timeframe: str,
             cursor = last_ts + 1
             time.sleep(0.12)
         except Exception as e:
-            print(f"[market_data] 下载中断: {e}，2s 后重试...")
+            consecutive_errors += 1
+            print(f"[market_data] 下载出错({consecutive_errors}/{MAX_ERRORS}): {e}")
+            if consecutive_errors >= MAX_ERRORS:
+                raise RuntimeError(
+                    f"连续 {MAX_ERRORS} 次请求失败，放弃下载 {symbol} 数据。"
+                    f"最后错误: {e}"
+                )
             time.sleep(2)
 
     if not all_ohlcv:
