@@ -20,6 +20,7 @@ export default function SettingsPage() {
   const [keyStatus, setKeyStatus]   = useState(null)
   const [keySaving, setKeySaving]   = useState(false)
   const [keyMsg, setKeyMsg]         = useState('')
+  const [keyValidating, setKeyValidating] = useState(false)
 
   // Telegram
   const [tgForm, setTgForm]   = useState({ tg_bot_token:'', tg_chat_id:'' })
@@ -39,11 +40,22 @@ export default function SettingsPage() {
     try {
       await keysApi.save(keyForm)
       const r = await keysApi.status(); setKeyStatus(r.data)
-      setKeyMsg('✅ API Key 已保存（AES 加密）')
+      setKeyMsg('✅ API Key 已保存（AES 加密）。建议点击「验证 API Key」确认可用')
       setKeyForm({ api_key:'', secret:'', passphrase:'', is_simulate: false })
     } catch (err) {
-      setKeyMsg('❌ ' + (err.response?.data?.detail || '保存失败'))
+      const d = err.response?.data?.detail
+      setKeyMsg('❌ ' + (Array.isArray(d) ? d.map(x => x.msg || x).join(' ') : d || '保存失败'))
     } finally { setKeySaving(false) }
+  }
+
+  const validateKey = async () => {
+    setKeyValidating(true); setKeyMsg('')
+    try {
+      const r = await keysApi.validate()
+      setKeyMsg('✅ ' + (r.data?.message || 'API Key 有效'))
+    } catch (err) {
+      setKeyMsg('❌ ' + (err.response?.data?.detail || '验证失败'))
+    } finally { setKeyValidating(false) }
   }
 
   const saveTg = async e => {
@@ -89,11 +101,16 @@ export default function SettingsPage() {
       {/* ── OKX API Key ── */}
       <Section icon={KeyRound} title="OKX API Key">
         {keyStatus?.configured && (
-          <div className="alert alert-success mb-12">
-            <Check size={12} style={{ marginRight:6, verticalAlign:'middle' }} />
-            已配置 API Key
-            {keyStatus.is_simulate && <span className="badge badge-yellow" style={{marginLeft:8}}>模拟盘</span>}
-            <span className="col-muted" style={{ marginLeft:8, fontSize:11 }}>更新于 {keyStatus.updated_at}</span>
+          <div className="alert alert-success mb-12" style={{ display:'flex', alignItems:'center', flexWrap:'wrap', gap:8 }}>
+            <span>
+              <Check size={12} style={{ marginRight:6, verticalAlign:'middle' }} />
+              已配置 API Key
+              {keyStatus.is_simulate && <span className="badge badge-yellow" style={{marginLeft:8}}>模拟盘</span>}
+              <span className="col-muted" style={{ marginLeft:8, fontSize:11 }}>更新于 {keyStatus.updated_at}</span>
+            </span>
+            <button type="button" className="btn-ghost btn-sm" onClick={validateKey} disabled={keyValidating} style={{ marginLeft:'auto' }}>
+              {keyValidating ? <span className="spinner" /> : '验证 API Key'}
+            </button>
           </div>
         )}
 

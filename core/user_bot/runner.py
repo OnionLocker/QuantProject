@@ -462,11 +462,12 @@ def run_user_bot(bot_state):
 
     # ── 弱点修复：启动时主动设置当日起始余额 ─────────────────────────────────
     # 原先 daily_start_balance 在第一笔亏损时才初始化，若首笔已亏则基准偏低。
-    # 现在在 Bot 启动时立即查询余额作为基准，确保日亏熔断计算准确。
+    # 现在在 Bot 启动时立即查询余额作为基准，确保日亏熔断计算准确；并写入 daily_balance 以便资产曲线立即有数据。
     try:
         _startup_balance = _get_swap_usdt(ex)
         if _startup_balance > 0:
             rm.set_daily_start_balance(_startup_balance)
+            record_balance(user_id, _startup_balance)
     except Exception:
         pass
 
@@ -891,7 +892,10 @@ def run_user_bot(bot_state):
             logger.error(f"{tag} 🚨 API Key 认证失败，Bot 停止: {e}")
             notify(
                 f"🚨 <b>{username} API Key 认证失败，Bot 已停止</b>\n"
-                f"请检查 API Key 是否有效或已过期，然后在设置页面重新配置。"
+                f"请检查：\n"
+                f"• <b>模拟盘/实盘是否一致</b>：在 OKX 模拟盘创建的 Key 需勾选「使用模拟盘」，实盘 Key 勿勾选。\n"
+                f"• <b>IP 白名单</b>：若 OKX 绑定了 IP，请将本服务器 IP 加入白名单。\n"
+                f"在设置页重新配置后，可先点「验证 API Key」再启动 Bot。"
             )
             stop_ev.set()
             return

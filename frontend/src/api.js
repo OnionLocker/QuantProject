@@ -37,6 +37,7 @@ export const authApi = {
 export const keysApi = {
   save: (data) => api.post('/api/keys/save', data),
   status: () => api.get('/api/keys/status'),
+  validate: () => api.get('/api/keys/validate'),
 }
 
 export const botApi = {
