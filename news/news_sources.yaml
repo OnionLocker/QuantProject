@@ -1,0 +1,212 @@
+# news_sources.yaml
+# 新闻源配置文件 - 供 OpenClaw 定时抓取
+#
+# 每个源的字段说明：
+#   name        : 显示名称
+#   url         : RSS / JSON API 地址
+#   type        : rss | json_api
+#   category    : crypto（加密货币）| macro（宏观/美股）
+#   weight      : 情绪分析权重（0.0~1.0），越高影响越大
+#   enabled     : true/false 快速开关
+#   json_path   : (仅json_api) 取新闻列表的JSON路径，如 "data.articles"
+#   title_field : (仅json_api) 标题字段名
+#   summary_field: (仅json_api) 摘要字段名（可为空）
+#   max_items   : 每次最多抓取条数
+#   cache_ttl_min: 缓存有效期（分钟），避免重复抓取消耗token
+
+# ══════════════════════════════════════════════════════════════
+# 加密货币新闻源
+# ══════════════════════════════════════════════════════════════
+crypto_sources:
+
+  - name: "CoinDesk RSS"
+    url: "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    type: rss
+    category: crypto
+    weight: 0.9
+    enabled: true
+    max_items: 10
+    cache_ttl_min: 30
+
+  - name: "CryptoSlate RSS"
+    url: "https://cryptoslate.com/feed/"
+    type: rss
+    category: crypto
+    weight: 0.7
+    enabled: true
+    max_items: 10
+    cache_ttl_min: 30
+
+  - name: "The Block RSS"
+    url: "https://www.theblock.co/rss.xml"
+    type: rss
+    category: crypto
+    weight: 0.8
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+  - name: "Bitcoin Magazine RSS"
+    url: "https://bitcoinmagazine.com/.rss/full/"
+    type: rss
+    category: crypto
+    weight: 0.7
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+  - name: "Decrypt RSS"
+    url: "https://decrypt.co/feed"
+    type: rss
+    category: crypto
+    weight: 0.7
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+  - name: "CryptoPanic API（免费）"
+    url: "https://cryptopanic.com/api/v1/posts/?auth_token=&public=true&kind=news"
+    type: json_api
+    category: crypto
+    weight: 0.85
+    enabled: false   # 需要填入 auth_token 才能启用
+    json_path: "results"
+    title_field: "title"
+    summary_field: ""
+    max_items: 15
+    cache_ttl_min: 20
+    note: "免费token: https://cryptopanic.com/developers/api/"
+
+  - name: "OKX 公告 RSS"
+    url: "https://www.okx.com/support/hc/en-us/categories/115000275131/articles.atom"
+    type: rss
+    category: crypto
+    weight: 1.0      # 交易所公告权重最高（可能影响交易）
+    enabled: true
+    max_items: 5
+    cache_ttl_min: 60
+
+# ══════════════════════════════════════════════════════════════
+# 宏观/美股新闻源（与加密市场高度相关）
+# ══════════════════════════════════════════════════════════════
+macro_sources:
+
+  - name: "Reuters Markets RSS"
+    url: "https://feeds.reuters.com/reuters/businessNews"
+    type: rss
+    category: macro
+    weight: 0.8
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+  - name: "Bloomberg Markets RSS"
+    url: "https://feeds.bloomberg.com/markets/news.rss"
+    type: rss
+    category: macro
+    weight: 0.9
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+  - name: "CNBC Markets RSS"
+    url: "https://www.cnbc.com/id/15839069/device/rss/rss.html"
+    type: rss
+    category: macro
+    weight: 0.75
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+  - name: "MarketWatch Top Stories"
+    url: "https://feeds.marketwatch.com/marketwatch/topstories/"
+    type: rss
+    category: macro
+    weight: 0.7
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+  - name: "Investing.com Crypto News RSS"
+    url: "https://www.investing.com/rss/news_301.rss"
+    type: rss
+    category: macro
+    weight: 0.8
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+  - name: "Federal Reserve Press Releases"
+    url: "https://www.federalreserve.gov/feeds/press_all.xml"
+    type: rss
+    category: macro
+    weight: 1.0      # 美联储公告权重最高（直接影响市场）
+    enabled: true
+    max_items: 3
+    cache_ttl_min: 120
+
+  - name: "Yahoo Finance Crypto RSS"
+    url: "https://finance.yahoo.com/rss/2.0/headline?s=BTC-USD&region=US&lang=en-US"
+    type: rss
+    category: macro
+    weight: 0.65
+    enabled: true
+    max_items: 8
+    cache_ttl_min: 30
+
+# ══════════════════════════════════════════════════════════════
+# 情绪分析配置
+# ══════════════════════════════════════════════════════════════
+sentiment_config:
+  # 情绪分析的触发方式
+  # "keyword"  : 纯关键词匹配（快速，不消耗AI token）
+  # "ai"       : 调用AI接口分析（精准，消耗token）
+  # "hybrid"   : 关键词预过滤 + AI深度分析（推荐：节省token）
+  mode: "hybrid"
+
+  # keyword模式：关键词权重映射
+  # 匹配到关键词时直接计分，不调用AI
+  bullish_keywords:
+    - ["ETF approval", 3.0]
+    - ["SEC approved", 3.0]
+    - ["institutional buying", 2.5]
+    - ["Bitcoin halving", 2.0]
+    - ["Fed pivot", 2.5]
+    - ["rate cut", 2.0]
+    - ["all-time high", 2.0]
+    - ["bull run", 1.5]
+    - ["adoption", 1.2]
+    - ["rally", 1.0]
+    - ["surge", 1.0]
+    - ["breakout", 1.0]
+    - ["积极", 1.0]
+    - ["上涨", 1.0]
+
+  bearish_keywords:
+    - ["SEC lawsuit", -3.0]
+    - ["exchange hack", -3.0]
+    - ["exchange collapse", -3.5]
+    - ["regulatory ban", -3.0]
+    - ["Fed rate hike", -2.5]
+    - ["inflation surge", -2.0]
+    - ["recession", -2.0]
+    - ["crash", -1.5]
+    - ["sell-off", -1.2]
+    - ["liquidation", -1.5]
+    - ["FUD", -1.0]
+    - ["崩盘", -2.0]
+    - ["监管打压", -2.5]
+
+  # hybrid模式：关键词预过滤阈值
+  # 关键词得分绝对值 > 此值时才调用AI深度分析
+  ai_trigger_threshold: 1.5
+
+  # AI分析时传入的最大新闻条数（控制token消耗）
+  ai_max_items: 8
+
+  # 情绪分数标准化范围 [-1.0, 1.0]
+  # > 0.3  → 看涨
+  # < -0.3 → 看跌
+  # 之间   → 中性
+  bullish_threshold: 0.3
+  bearish_threshold: -0.3

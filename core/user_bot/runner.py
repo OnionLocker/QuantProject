@@ -428,7 +428,21 @@ def run_user_bot(bot_state):
     INTERVAL      = cfg["check_interval"]
     RISK_PCT      = cfg["risk_pct"]
 
-    strategy = get_strategy(cfg["strategy_name"], **cfg["strategy_params"])
+    # ── 策略初始化：AUTO 模式启用选择器，否则固定策略 ──────────────────────
+    global_cfg    = get_config()
+    strategy_name = cfg["strategy_name"]
+    use_auto      = (strategy_name.upper() == "AUTO")
+
+    selector = None
+    if use_auto:
+        from strategy.selector import MarketRegimeSelector
+        selector = MarketRegimeSelector(global_cfg)
+        logger.info(f"{tag} 自动策略选择器已启用")
+
+    strategy = get_strategy(
+        "PA_5S" if use_auto else strategy_name,
+        **({} if use_auto else cfg["strategy_params"])
+    )
 
     # 同步更新 RiskManager 的风控参数（支持 DB 里自定义）
     rm.max_consecutive_losses = cfg["max_consecutive_losses"]
@@ -601,6 +615,41 @@ def run_user_bot(bot_state):
             df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
             df.set_index("timestamp", inplace=True)
+
+            current_price = float(df.iloc[-1]["close"])
+
+            # ── AUTO模式：每轮评估市场状态，按需热切换策略 ──────────────────
+            if use_auto and selector is not None:
+                new_strategy, regime_result = selector.get_strategy(df)
+                if new_strategy is not None:
+                    old_name = strategy.name
+                    strategy = new_strategy
+                    # K线数可能需要更多，重新拉取
+                    kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
+                    ohlcv = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=kline_limit)
+                    df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                    df.set_index("timestamp", inplace=True)
+                    logger.info(
+                        f"{tag} 策略热切换: {old_name} → {strategy.name} "
+                        f"({regime_result['reason']})"
+                    )
+                    # 空仓时才推送切换通知，有仓位时等平仓后生效
+                    if state["position_amount"] == 0:
+                        notify(
+                            f"🔄 <b>{username} 策略已切换</b>\n"
+                            f"新策略: <b>{strategy.name}</b>\n"
+                            f"市场状态: {regime_result['regime'].upper()}\n"
+                            f"技术面: {regime_result['tech_regime']} | "
+                            f"新闻面: {regime_result['news_regime']}\n"
+                            f"置信度: {regime_result['confidence']:.0%}"
+                        )
+            # AUTO模式下若发生切换，df 已在切换块内重新拉取
+            # 非AUTO模式在此处构建 df
+            if not use_auto or selector is None:
+                df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df.set_index("timestamp", inplace=True)
 
             current_price = float(df.iloc[-1]["close"])
             signal    = strategy.generate_signal(df)
