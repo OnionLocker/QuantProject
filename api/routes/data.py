@@ -7,7 +7,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
 from api.auth.jwt_handler import get_current_user
-from execution.db_handler import get_conn, load_user_config
+from execution.db_handler import (
+    get_conn, load_user_config,
+    save_backtest_history, load_backtest_history, load_backtest_history_detail,
+)
 from utils.config_loader import get_config
 from strategy.registry import list_strategies
 from backtest.engine import SUPPORTED_SYMBOLS, SUPPORTED_TIMEFRAMES
@@ -140,6 +143,12 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
                 silent          = True,
             )
             _backtest_results[uid] = result or {"status": "done"}
+            # 回测成功则持久化历史
+            if result and result.get("status") == "done":
+                try:
+                    save_backtest_history(uid, result)
+                except Exception:
+                    pass
         except Exception as e:
             _backtest_results[uid] = {"status": "error", "error": str(e)}
         finally:
@@ -155,4 +164,18 @@ def get_backtest_result(user=Depends(get_current_user)):
     result = _backtest_results.get(uid)
     if not result:
         return {"status": "no_result"}
+    return result
+
+
+@router.get("/backtest/history", summary="获取历史回测列表（最近20条摘要）")
+def get_backtest_history(user=Depends(get_current_user)):
+    return load_backtest_history(user["id"])
+
+
+@router.get("/backtest/history/{history_id}", summary="获取某条历史回测的完整结果")
+def get_backtest_history_detail(history_id: int, user=Depends(get_current_user)):
+    result = load_backtest_history_detail(user["id"], history_id)
+    if result is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="历史记录不存在")
     return result

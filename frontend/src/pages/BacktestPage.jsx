@@ -382,6 +382,148 @@ export default function BacktestPage() {
           </div>
         </>
       )}
+
+      {/* ── 历史回测面板 ─────────────────────────────────────────── */}
+      <HistoryPanel
+        onLoad={(r) => {
+          setResult(r)
+          setFormDirty(false)
+          window.scrollTo({ top: 0, behavior: 'smooth' })
+        }}
+      />
+    </div>
+  )
+}
+
+// ── 历史回测面板组件 ───────────────────────────────────────────────────────────
+function HistoryPanel({ onLoad }) {
+  const [open, setOpen]       = useState(false)
+  const [list, setList]       = useState([])
+  const [loading, setLoading] = useState(false)
+  const [loadingId, setLoadingId] = useState(null)
+
+  const fetchHistory = () => {
+    setLoading(true)
+    dataApi.backtestHistory()
+      .then(r => setList(r.data || []))
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }
+
+  const handleToggle = () => {
+    if (!open) fetchHistory()
+    setOpen(o => !o)
+  }
+
+  const handleLoad = async (id) => {
+    setLoadingId(id)
+    try {
+      const r = await dataApi.backtestHistoryDetail(id)
+      onLoad(r.data)
+    } catch {}
+    setLoadingId(null)
+  }
+
+  const roiColor = (v) => v >= 0 ? 'var(--green)' : 'var(--red)'
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <button
+        onClick={handleToggle}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 16px', borderRadius: 8, cursor: 'pointer',
+          background: open ? 'rgba(59,130,246,0.12)' : 'rgba(255,255,255,0.04)',
+          border: `1px solid ${open ? 'rgba(59,130,246,0.4)' : 'rgba(255,255,255,0.1)'}`,
+          color: open ? 'var(--blue)' : 'var(--muted)',
+          fontSize: 13, fontWeight: 500,
+          transition: 'all .15s',
+        }}
+      >
+        📋 历史回测记录
+        {list.length > 0 && (
+          <span style={{
+            fontSize: 11, padding: '1px 7px', borderRadius: 10,
+            background: 'rgba(59,130,246,0.2)', color: 'var(--blue)',
+          }}>{list.length}</span>
+        )}
+        <span style={{ marginLeft: 'auto', fontSize: 11 }}>{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div style={{
+          marginTop: 8, borderRadius: 10,
+          border: '1px solid rgba(255,255,255,0.08)',
+          background: 'rgba(255,255,255,0.02)',
+          overflow: 'hidden',
+        }}>
+          {loading ? (
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+              加载中...
+            </div>
+          ) : list.length === 0 ? (
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+              暂无历史记录，完成一次回测后自动保存
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                    {['时间', '策略', '品种', '周期', 'ROI', '胜率', '交易数', '最大回撤', ''].map(h => (
+                      <th key={h} style={{
+                        padding: '10px 12px', textAlign: 'left',
+                        color: 'var(--muted)', fontWeight: 500, whiteSpace: 'nowrap',
+                      }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {list.map((row, idx) => (
+                    <tr key={row.id} style={{
+                      borderBottom: idx < list.length - 1 ? '1px solid rgba(255,255,255,0.05)' : 'none',
+                      transition: 'background .1s',
+                    }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.03)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <td style={{ padding: '9px 12px', color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                        {row.created_at?.slice(0, 16).replace('T', ' ')}
+                      </td>
+                      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{row.strategy}</td>
+                      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{row.symbol}</td>
+                      <td style={{ padding: '9px 12px' }}>{row.timeframe}</td>
+                      <td style={{ padding: '9px 12px', fontWeight: 600, color: roiColor(row.roi_pct) }}>
+                        {row.roi_pct >= 0 ? '+' : ''}{row.roi_pct?.toFixed(2)}%
+                      </td>
+                      <td style={{ padding: '9px 12px' }}>{row.win_rate_pct?.toFixed(1)}%</td>
+                      <td style={{ padding: '9px 12px' }}>{row.total_trades}</td>
+                      <td style={{ padding: '9px 12px', color: '#f39c12' }}>
+                        {row.max_drawdown_pct?.toFixed(2)}%
+                      </td>
+                      <td style={{ padding: '9px 12px' }}>
+                        <button
+                          onClick={() => handleLoad(row.id)}
+                          disabled={loadingId === row.id}
+                          style={{
+                            padding: '3px 10px', borderRadius: 6, fontSize: 11,
+                            background: 'rgba(59,130,246,0.15)',
+                            border: '1px solid rgba(59,130,246,0.3)',
+                            color: 'var(--blue)', cursor: 'pointer',
+                            opacity: loadingId === row.id ? 0.5 : 1,
+                          }}
+                        >
+                          {loadingId === row.id ? '...' : '查看'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -127,8 +127,109 @@ def init_db():
         )
     ''')
 
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS backtest_history (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id          INTEGER NOT NULL,
+            created_at       TEXT    DEFAULT (datetime('now')),
+            strategy         TEXT,
+            symbol           TEXT,
+            timeframe        TEXT,
+            start_date       TEXT,
+            end_date         TEXT,
+            initial_capital  REAL,
+            final_balance    REAL,
+            roi_pct          REAL,
+            win_rate_pct     REAL,
+            total_trades     INTEGER,
+            max_drawdown_pct REAL,
+            full_result      TEXT
+        )
+    ''')
+
     conn.commit()
     conn.close()
+
+
+# ── 回测历史存取 ──────────────────────────────────────────────────────────────
+
+def save_backtest_history(user_id: int, result: dict):
+    """保存一次回测结果，每用户最多保留最近 20 条。"""
+    import json as _json
+    conn = get_conn()
+    try:
+        conn.execute('''
+            INSERT INTO backtest_history
+              (user_id, strategy, symbol, timeframe,
+               start_date, end_date, initial_capital, final_balance,
+               roi_pct, win_rate_pct, total_trades, max_drawdown_pct, full_result)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_id,
+            result.get("strategy"),
+            result.get("symbol"),
+            result.get("timeframe"),
+            result.get("start_date"),
+            result.get("end_date"),
+            result.get("initial_capital"),
+            result.get("final_balance"),
+            result.get("roi_pct"),
+            result.get("win_rate_pct"),
+            result.get("total_trades"),
+            result.get("max_drawdown_pct"),
+            _json.dumps(result, ensure_ascii=False),
+        ))
+        # 超过 20 条时删除最旧的
+        conn.execute('''
+            DELETE FROM backtest_history
+            WHERE user_id = ? AND id NOT IN (
+                SELECT id FROM backtest_history
+                WHERE user_id = ?
+                ORDER BY id DESC LIMIT 20
+            )
+        ''', (user_id, user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_backtest_history(user_id: int) -> list:
+    """返回该用户最近 20 条回测摘要（不含 full_result）。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute('''
+            SELECT id, created_at, strategy, symbol, timeframe,
+                   start_date, end_date, initial_capital, final_balance,
+                   roi_pct, win_rate_pct, total_trades, max_drawdown_pct
+            FROM backtest_history
+            WHERE user_id = ?
+            ORDER BY id DESC LIMIT 20
+        ''', (user_id,)).fetchall()
+    finally:
+        conn.close()
+    keys = ["id", "created_at", "strategy", "symbol", "timeframe",
+            "start_date", "end_date", "initial_capital", "final_balance",
+            "roi_pct", "win_rate_pct", "total_trades", "max_drawdown_pct"]
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def load_backtest_history_detail(user_id: int, history_id: int) -> dict | None:
+    """返回某条历史回测的完整结果（含 equity_curve）。"""
+    import json as _json
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT full_result FROM backtest_history WHERE id=? AND user_id=?",
+            (history_id, user_id)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        return _json.loads(row[0])
+    except Exception:
+        return None
 
 
 # ── 每用户策略/交易配置存取 ───────────────────────────────────────────────────

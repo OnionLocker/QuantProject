@@ -126,6 +126,11 @@ def run_backtest(
     if hasattr(strategy, "precompute"):
         df = strategy.precompute(df)
 
+    # 提取市场状态分布统计（ADAPTIVE 策略特有）
+    regime_stats = {}
+    if hasattr(strategy, "regime_stats"):
+        regime_stats = strategy.regime_stats(df)
+
     # ── 回测主循环 ───────────────────────────────────────────────────────────
     balance         = initial_capital
     position_amount = 0
@@ -350,6 +355,8 @@ def run_backtest(
         "risk_pct":          RISK_PCT,
         "fee_rate":          FEE_RATE,
         "slippage":          SLIPPAGE,
+        # 市场状态分布（ADAPTIVE 策略特有，其他策略为空 {}）
+        "regime_stats":      regime_stats,
     }
 
 

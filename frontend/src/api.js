@@ -53,6 +53,8 @@ export const dataApi = {
   backtestOptions:  () => api.get('/api/data/backtest/options'),
   runBacktest:      (params) => api.post('/api/data/backtest/run', params),
   backtestResult:   () => api.get('/api/data/backtest/result'),
+  backtestHistory:  () => api.get('/api/data/backtest/history'),
+  backtestHistoryDetail: (id) => api.get(`/api/data/backtest/history/${id}`),
 }
 
 export const notifyApi = {

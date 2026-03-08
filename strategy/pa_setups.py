@@ -57,9 +57,14 @@ class PriceActionSetups(BaseStrategy):
             "tip": "ATR 用于计算 Tick 缓冲大小",
         },
         {
+            "key": "cooldown", "label": "信号冷却期（K线数）",
+            "type": "int", "default": 8, "min": 3, "max": 20, "step": 1,
+            "tip": "两次信号之间最少间隔多少根K线，避免过度交易",
+        },
+        {
             "key": "direction", "label": "交易方向",
-            "type": "str", "default": "both",
-            "tip": "both=双向, long=只做多, short=只做空",
+            "type": "str", "default": "long",
+            "tip": "long=只做多, short=只做空, both=双向",
         },
     ]
 
@@ -70,7 +75,8 @@ class PriceActionSetups(BaseStrategy):
         trend_bars:  int   = 20,
         spring_bars: int   = 20,
         atr_period:  int   = 14,
-        direction:   str   = "both",
+        cooldown:    int   = 8,
+        direction:   str   = "long",
     ):
         super().__init__(name="PA_5Setups_双向价格行为")
         self.rr1         = rr1
@@ -78,7 +84,8 @@ class PriceActionSetups(BaseStrategy):
         self.trend_bars  = trend_bars
         self.spring_bars = spring_bars
         self.atr_period  = atr_period
-        self.direction   = direction.lower()  # "both" | "long" | "short"
+        self.cooldown    = cooldown
+        self.direction   = direction.lower()  # "long" | "short" | "both"
         self.warmup_bars = max(ema_period + trend_bars, spring_bars, atr_period) + 15
 
     # ── 指标计算 ─────────────────────────────────────────────────────────────
@@ -106,37 +113,49 @@ class PriceActionSetups(BaseStrategy):
         if np.isnan(ATR[j]) or ATR[j] == 0:
             return 'HOLD', 0.0, ''
 
-        tick  = ATR[j] * 0.05
+        tick  = ATR[j] * 0.08   # 稍大的缓冲，减少因噪音触发止损
         totj  = TOTAL[j]
 
+        # ── 全局过滤1：K线最小尺寸（过滤噪音小K线）────────────────────────
+        if totj < ATR[j] * 1.0:   # 至少1倍ATR，严格过滤小K线
+            return 'HOLD', 0.0, ''
+
+        # ── 全局过滤2：做多须在EMA上方 + EMA方向向上（双重趋势确认）──────
+        ema_rising = j >= 5 and E[j] > E[j - 5]   # EMA5根内方向向上
+        in_uptrend = C[j] > E[j] and ema_rising
+
         # ── S1L: Pin Bar 探底反转（长下影线）────────────────────────────────
-        if totj > 0:
+        if totj > 0 and in_uptrend:
             is_pin = (
-                LTAIL[j]  > totj * 0.60 and   # 下影线 > 60% 总长
-                BODY[j]   < totj * 0.35 and   # 实体 < 35% 总长
-                UTAIL[j]  < totj * 0.25 and   # 上影线 < 25% (排除十字星)
-                C[j]      >= H[j] - totj * 0.35
+                LTAIL[j]  > totj * 0.66 and   # 下影线 > 66% 总长（标准定义）
+                BODY[j]   < totj * 0.33 and   # 实体 < 33% 总长
+                UTAIL[j]  < totj * 0.20 and   # 上影线很短（收盘强势）
+                C[j]      >= H[j] - totj * 0.25
             )
             if j >= 5:
-                ctx = C[j] <= np.percentile(C[j - 5:j], 45)
+                ctx = C[j] <= np.percentile(C[j - 5:j], 40)
             else:
                 ctx = True
             if is_pin and ctx:
                 return 'BUY', L[j] - tick, '🟢 S1L: Pin Bar 探底反转'
 
         # ── S2L: 孕线突破做多 ────────────────────────────────────────────────
-        if j >= 1:
+        if j >= 1 and in_uptrend:
             m = j - 1
-            is_inside  = H[j] < H[m] and L[j] > L[m]
-            is_uptrend = C[j] > E[j]
-            if is_inside and is_uptrend:
+            mother_range = TOTAL[m]
+            inside_range = totj
+            # 严格：子线 < 母线45%（真正的蓄能收缩），母线须为阳线（顺势母线）
+            is_inside    = H[j] < H[m] and L[j] > L[m]
+            tight_inside = mother_range > 0 and inside_range < mother_range * 0.45
+            mother_bull  = C[m] > O[m]  # 母线阳线，与趋势方向一致
+            if is_inside and tight_inside and mother_bull:
                 return 'BUY', L[j] - tick, '🟢 S2L: 孕线突破做多'
 
         # ── S3L: 均线深度回调顺势做多 ────────────────────────────────────────
         if j >= self.trend_bars + 5:
             ts = j - self.trend_bars
             pct_above    = np.mean(C[ts:j + 1] > E[ts:j + 1])
-            is_bull_trend = pct_above >= 0.6
+            is_bull_trend = pct_above >= 0.65   # 提高趋势要求
 
             pb_start = max(ts + 5, j - 10)
             touched, pb_low = False, np.inf
@@ -148,30 +167,32 @@ class PriceActionSetups(BaseStrategy):
 
             is_strong = (
                 C[j] > O[j] and totj > 0 and
-                C[j] >= H[j] - totj * 0.3 and
+                C[j] >= H[j] - totj * 0.25 and   # 收盘更接近最高（强势确认）
                 j >= 1 and C[j] > H[j - 1]
             )
             if is_bull_trend and touched and is_strong and pb_low < np.inf:
                 return 'BUY', pb_low - tick, '🟢 S3L: 均线回调顺势做多'
 
         # ── S4L: 看涨吞没形态 ────────────────────────────────────────────────
-        if j >= 1:
+        if j >= 1 and in_uptrend:
             m = j - 1
             engulf = (
                 C[m] < O[m] and C[j] > O[j] and
                 O[j] <= C[m] and C[j] >= O[m]
             )
-            momentum = BODY[j] > np.mean(BODY[max(0, j - 10):j]) if j >= 11 else True
+            # 更严格的动量过滤：实体 > 1.5x 近期均值
+            avg_body = np.mean(BODY[max(0, j - 10):j]) if j >= 5 else BODY[j]
+            momentum = BODY[j] > avg_body * 1.5
             if engulf and momentum:
                 return 'BUY', L[j] - tick, '🟢 S4L: 看涨吞没'
 
         # ── S5L: 假突破/破底翻（Spring）─────────────────────────────────────
         if j >= self.spring_bars:
             recent_low  = np.min(L[j - self.spring_bars:j])
-            broke_below = L[j] < recent_low
+            broke_below = L[j] < recent_low * 0.999   # 明显跌破（0.1%以上）
             reclaimed   = C[j] > recent_low
-            upper_half  = totj > 0 and C[j] >= L[j] + totj * 0.5
-            if broke_below and reclaimed and upper_half:
+            upper_third = totj > 0 and C[j] >= L[j] + totj * 0.66  # 收在上1/3（更严格）
+            if broke_below and reclaimed and upper_third:
                 return 'BUY', L[j] - tick, '🟢 S5L: 假突破破底翻'
 
         return 'HOLD', 0.0, ''
@@ -181,30 +202,41 @@ class PriceActionSetups(BaseStrategy):
         if np.isnan(ATR[j]) or ATR[j] == 0:
             return 'HOLD', 0.0, ''
 
-        tick  = ATR[j] * 0.05
+        tick  = ATR[j] * 0.08
         totj  = TOTAL[j]
 
+        # ── 全局过滤1：K线最小尺寸 ───────────────────────────────────────────
+        if totj < ATR[j] * 1.0:
+            return 'HOLD', 0.0, ''
+
+        # ── 全局过滤2：做空须在EMA下方 + EMA方向向下 ─────────────────────
+        ema_falling  = j >= 5 and E[j] < E[j - 5]
+        in_downtrend = C[j] < E[j] and ema_falling
+
         # ── S1S: Pin Bar 顶部反转（长上影线）────────────────────────────────
-        if totj > 0:
+        if totj > 0 and in_downtrend:
             is_pin = (
-                UTAIL[j]  > totj * 0.60 and   # 上影线 > 60%
-                BODY[j]   < totj * 0.35 and   # 实体 < 35%
-                LTAIL[j]  < totj * 0.25 and   # 下影线 < 25%
-                C[j]      <= L[j] + totj * 0.35
+                UTAIL[j]  > totj * 0.66 and
+                BODY[j]   < totj * 0.33 and
+                LTAIL[j]  < totj * 0.20 and
+                C[j]      <= L[j] + totj * 0.25
             )
             if j >= 5:
-                ctx = C[j] >= np.percentile(C[j - 5:j], 55)
+                ctx = C[j] >= np.percentile(C[j - 5:j], 60)
             else:
                 ctx = True
             if is_pin and ctx:
                 return 'SELL', H[j] + tick, '🔴 S1S: Pin Bar 顶部反转'
 
         # ── S2S: 孕线突破做空 ────────────────────────────────────────────────
-        if j >= 1:
+        if j >= 1 and in_downtrend:
             m = j - 1
+            mother_range = TOTAL[m]
+            inside_range = totj
             is_inside    = H[j] < H[m] and L[j] > L[m]
-            is_downtrend = C[j] < E[j]
-            if is_inside and is_downtrend:
+            tight_inside = mother_range > 0 and inside_range < mother_range * 0.45
+            mother_bear  = C[m] < O[m]
+            if is_inside and tight_inside and mother_bear:
                 return 'SELL', H[j] + tick, '🔴 S2S: 孕线突破做空'
 
         # ── S3S: 均线反弹做空（死猫跳）──────────────────────────────────────
@@ -230,23 +262,24 @@ class PriceActionSetups(BaseStrategy):
                 return 'SELL', pb_high + tick, '🔴 S3S: 均线反弹做空'
 
         # ── S4S: 看跌吞没形态 ────────────────────────────────────────────────
-        if j >= 1:
+        if j >= 1 and in_downtrend:
             m = j - 1
             engulf = (
                 C[m] > O[m] and C[j] < O[j] and
                 O[j] >= C[m] and C[j] <= O[m]
             )
-            momentum = BODY[j] > np.mean(BODY[max(0, j - 10):j]) if j >= 11 else True
+            avg_body = np.mean(BODY[max(0, j - 10):j]) if j >= 5 else BODY[j]
+            momentum = BODY[j] > avg_body * 1.5
             if engulf and momentum:
                 return 'SELL', H[j] + tick, '🔴 S4S: 看跌吞没'
 
         # ── S5S: 假突破/顶部翻（Upthrust）───────────────────────────────────
         if j >= self.spring_bars:
-            recent_high  = np.max(H[j - self.spring_bars:j])
-            broke_above  = H[j] > recent_high
-            reclaimed    = C[j] < recent_high
-            lower_half   = totj > 0 and C[j] <= H[j] - totj * 0.5
-            if broke_above and reclaimed and lower_half:
+            recent_high = np.max(H[j - self.spring_bars:j])
+            broke_above = H[j] > recent_high * 1.001  # 明显突破
+            reclaimed   = C[j] < recent_high
+            lower_third = totj > 0 and C[j] <= H[j] - totj * 0.66  # 收在下1/3
+            if broke_above and reclaimed and lower_third:
                 return 'SELL', H[j] + tick, '🔴 S5S: 假突破顶部翻'
 
         return 'HOLD', 0.0, ''
@@ -290,29 +323,39 @@ class PriceActionSetups(BaseStrategy):
         sig_tp2 = np.zeros(n)
         reasons = ['观望'] * n
 
+        last_signal_i = -999
+        COOLDOWN = self.cooldown
+
         for i in range(self.warmup_bars, n - 1):
             j = i - 1  # 信号棒（已完结）
+
+            # 冷却期：距上次信号不足 COOLDOWN 根则跳过
+            if i - last_signal_i < COOLDOWN:
+                continue
+
             action, sl, reason = self._detect(H, L, O, C, E, ATR, BODY, TOTAL, LTAIL, UTAIL, j)
 
             if action == 'BUY':
                 entry = O[i]
                 risk  = entry - sl
-                if risk > entry * 0.0005:
+                if risk > entry * 0.001:   # 最小风险提高到 0.1%
                     actions[i] = 'BUY'
                     sig_sl[i]  = sl
                     sig_tp1[i] = entry + risk * self.rr1
                     sig_tp2[i] = entry + risk * self.rr1 * 2
                     reasons[i] = reason
+                    last_signal_i = i
 
             elif action == 'SELL':
                 entry = O[i]
                 risk  = sl - entry
-                if risk > entry * 0.0005:
+                if risk > entry * 0.001:
                     actions[i] = 'SELL'
                     sig_sl[i]  = sl
                     sig_tp1[i] = entry - risk * self.rr1
                     sig_tp2[i] = entry - risk * self.rr1 * 2
                     reasons[i] = reason
+                    last_signal_i = i
 
         df['sig_action'] = actions
         df['sig_sl']     = sig_sl

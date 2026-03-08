@@ -7,9 +7,11 @@ strategy/registry.py - 策略注册表
 """
 from strategy.base import BaseStrategy
 from strategy.pa_setups import PriceActionSetups
+from strategy.adaptive import AdaptiveStrategy
 
 _REGISTRY: dict[str, type[BaseStrategy]] = {
-    "PA_5S": PriceActionSetups,
+    "PA_5S":    PriceActionSetups,
+    "ADAPTIVE": AdaptiveStrategy,
 }
 
 
