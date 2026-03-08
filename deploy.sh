@@ -59,6 +59,10 @@ else
   echo "✅ JWT_SECRET 已存在"
 fi
 
+# Fix: 限制 .env 文件权限，仅当前用户可读，防止其他用户窃取密钥
+chmod 600 .env
+echo "🔒 .env 权限已设为 600（仅当前用户可读）"
+
 # ── 4. 检测 Node.js ────────────────────────────────────────────────────────────
 if ! command -v node &>/dev/null; then
   echo "❌ 未找到 Node.js，请先安装："

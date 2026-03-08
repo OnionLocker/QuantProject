@@ -129,6 +129,11 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
             )
 
             strategy = get_strategy(strategy_name, **strategy_params)
+
+            # 进度回调：引擎每完成 10% K线更新一次内存状态
+            def _progress_cb(pct: int):
+                _backtest_results[uid] = {"status": "running", "progress_pct": pct}
+
             result = _engine(
                 strategy        = strategy,
                 symbol          = symbol,
@@ -141,6 +146,7 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
                 fee_rate        = fee_rate,
                 slippage        = slippage,
                 silent          = True,
+                progress_cb     = _progress_cb,
             )
             _backtest_results[uid] = result or {"status": "done"}
             # 回测成功则持久化历史
@@ -162,9 +168,16 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
 def get_backtest_result(user=Depends(get_current_user)):
     uid = user["id"]
     result = _backtest_results.get(uid)
-    if not result:
-        return {"status": "no_result"}
-    return result
+    # 内存有结果（含 running 状态）直接返回
+    if result:
+        return result
+    # 内存为空（服务重启后）：fallback 读数据库最新一条
+    history = load_backtest_history(uid)
+    if history:
+        detail = load_backtest_history_detail(uid, history[0]["id"])
+        if detail:
+            return detail
+    return {"status": "no_result"}
 
 
 @router.get("/backtest/history", summary="获取历史回测列表（最近20条摘要）")

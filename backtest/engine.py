@@ -69,6 +69,7 @@ def run_backtest(
     fee_rate:    float     = None,   # 手续费率，None = 读 config.yaml
     slippage:    float     = None,   # 滑点假设，None = 使用默认值 0.0002
     silent: bool           = False,
+    progress_cb            = None,   # 进度回调 callable(pct: int)，每10%调用一次
 ) -> dict:
     """
     :param strategy:        策略实例（为 None 时从 config.yaml 自动创建）
@@ -182,7 +183,17 @@ def run_backtest(
     _iter = tqdm(range(start_idx, len(df)), desc="⏳ 回测", unit="K", ncols=90,
                  disable=silent)
 
+    total_steps     = len(df) - start_idx
+    last_pct_report = -1   # 进度上报去重
+
     for i in _iter:
+        # 进度回调：每完成 10% 上报一次
+        if progress_cb and total_steps > 0:
+            pct = int((i - start_idx) / total_steps * 100)
+            pct = min(pct, 99)   # 100% 留给引擎返回结果时
+            if pct // 10 != last_pct_report // 10:
+                last_pct_report = pct
+                progress_cb(pct)
         candle           = df.iloc[i]
         ts               = candle.name
         c_open           = candle["open"]
@@ -246,10 +257,24 @@ def run_backtest(
         elif position_amount > 0 and position_side == "long":
             close_price, close_reason = 0.0, ""
 
-            if c_low <= active_sl:
+            sl_hit = c_low  <= active_sl
+            tp_hit = c_high >= active_tp
+
+            if sl_hit and tp_hit:
+                # 同一根K线同时触碰SL和TP：按谁离入场价更近来判断先触发
+                # 多单：SL在下方，TP在上方；谁距入场价更近谁先触发
+                dist_sl = entry_price - active_sl
+                dist_tp = active_tp  - entry_price
+                if dist_tp <= dist_sl:
+                    close_price, close_reason = active_tp * (1 + SLIPPAGE), "止盈"
+                    winning_trades += 1
+                else:
+                    close_price, close_reason = active_sl * (1 - SLIPPAGE), "止损"
+                    losing_trades += 1
+            elif sl_hit:
                 close_price, close_reason = active_sl * (1 - SLIPPAGE), "止损"
                 losing_trades += 1
-            elif c_high >= active_tp:
+            elif tp_hit:
                 close_price, close_reason = active_tp * (1 + SLIPPAGE), "止盈"
                 winning_trades += 1
             elif action == "SELL":
@@ -283,10 +308,24 @@ def run_backtest(
         elif position_amount > 0 and position_side == "short":
             close_price, close_reason = 0.0, ""
 
-            if c_high >= active_sl:
+            sl_hit = c_high >= active_sl
+            tp_hit = c_low  <= active_tp
+
+            if sl_hit and tp_hit:
+                # 同一根K线同时触碰SL和TP：按谁离入场价更近来判断先触发
+                # 空单：SL在上方，TP在下方；谁距入场价更近谁先触发
+                dist_sl = active_sl  - entry_price
+                dist_tp = entry_price - active_tp
+                if dist_tp <= dist_sl:
+                    close_price, close_reason = active_tp * (1 - SLIPPAGE), "止盈"
+                    winning_trades += 1
+                else:
+                    close_price, close_reason = active_sl * (1 + SLIPPAGE), "止损"
+                    losing_trades += 1
+            elif sl_hit:
                 close_price, close_reason = active_sl * (1 + SLIPPAGE), "止损"
                 losing_trades += 1
-            elif c_low <= active_tp:
+            elif tp_hit:
                 close_price, close_reason = active_tp * (1 - SLIPPAGE), "止盈"
                 winning_trades += 1
             elif action == "BUY":

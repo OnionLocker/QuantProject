@@ -595,7 +595,9 @@ def run_user_bot(bot_state):
                     continue
 
             # ── K 线 & 信号 ──────────────────────────────────────────────────
-            ohlcv = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=100)
+            # Fix: limit 动态适配策略预热期，确保实盘信号窗口与回测一致
+            kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
+            ohlcv = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=kline_limit)
             df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
             df.set_index("timestamp", inplace=True)
@@ -623,7 +625,12 @@ def run_user_bot(bot_state):
                     continue
 
                 contracts = int(math.floor(usdt_free * RISK_PCT / risk_per))
-                contracts = min(contracts, rm.max_trade_amount)
+
+                # Fix: max_trade_amount 是金额(USDT)上限，需换算为张数上限后再比较
+                max_contracts_by_amount = int(math.floor(
+                    rm.max_trade_amount / (current_price * CONTRACT_SIZE / LEVERAGE)
+                )) if (current_price * CONTRACT_SIZE / LEVERAGE) > 0 else contracts
+                contracts = min(contracts, max_contracts_by_amount)
 
                 if contracts < 1:
                     logger.info(f"{tag} 仓位计算 <1 张（止损太宽或余额不足），跳过")

@@ -30,10 +30,16 @@ from api.routes.notify      import router as notify_router
 from api.routes.user_config import router as user_config_router
 from api.auth.jwt_handler import get_current_user
 from core.user_bot import manager as bot_mgr
-from execution.db_handler import DB_PATH
+from execution.db_handler import DB_PATH, init_db
 import sqlite3
 
 app = FastAPI(title="QuantBot", version="3.0-multiuser")
+
+
+@app.on_event("startup")
+def on_startup():
+    """服务启动时初始化数据库（只在这里调用，避免 import db_handler 时自动执行）"""
+    init_db()
 
 app.add_middleware(
     CORSMiddleware,

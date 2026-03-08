@@ -335,8 +335,7 @@ def save_tg_config(user_id: int, tg_bot_token_enc: str, tg_chat_id_enc: str):
         conn.close()
 
 
-def load_tg_config(user_id: int) -> dict:
-    """返回加密存储的 token/chat_id，调用方负责解密。未配置则返回空字符串。"""
+def load_tg_config(user_id: int) -> dict:    """返回加密存储的 token/chat_id，调用方负责解密。未配置则返回空字符串。"""
     conn = get_conn()
     try:
         row = conn.execute(
@@ -449,4 +448,5 @@ def record_trade(user_id=None, side=None, price=None, amount=None,
         conn.close()
 
 
-init_db()
+# init_db() 已移至 api/server.py 的 startup 事件中显式调用，
+# 避免 import 时自动执行造成测试污染或副作用。

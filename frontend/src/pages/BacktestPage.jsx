@@ -50,6 +50,7 @@ export default function BacktestPage() {
   })
 
   const [running,  setRunning]  = useState(false)
+  const [progress, setProgress] = useState(0)
   const [result,   setResult]   = useState(null)
   const [errMsg,   setErrMsg]   = useState('')
   const pollRef = useRef(null)
@@ -81,16 +82,20 @@ export default function BacktestPage() {
 
   const startBacktest = async () => {
     setRunning(true)
+    setProgress(0)
     setResult(null)
     setErrMsg('')
     try {
       await dataApi.runBacktest(form)
-      // 轮询结果
+      // 轮询结果，并同步更新进度
       pollRef.current = setInterval(async () => {
         const r = await dataApi.backtestResult()
         const d = r.data
-        if (d.status !== 'running') {
+        if (d.status === 'running') {
+          setProgress(d.progress_pct || 0)
+        } else {
           clearInterval(pollRef.current)
+          setProgress(100)
           setRunning(false)
           if (d.status === 'error') {
             setErrMsg(d.error || '回测失败')
@@ -278,6 +283,32 @@ export default function BacktestPage() {
                 : <><Play size={14} style={{marginRight:6}} />开始回测</>
               }
             </button>
+
+            {/* 进度条：仅 running 时显示 */}
+            {running && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between',
+                  fontSize: 11, color: 'var(--muted)', marginBottom: 4,
+                }}>
+                  <span>计算中...</span>
+                  <span>{progress}%</span>
+                </div>
+                <div style={{
+                  height: 6, borderRadius: 3,
+                  background: 'rgba(255,255,255,0.08)',
+                  overflow: 'hidden',
+                }}>
+                  <div style={{
+                    height: '100%',
+                    width: `${progress}%`,
+                    borderRadius: 3,
+                    background: 'linear-gradient(90deg, var(--blue), var(--green))',
+                    transition: 'width 0.4s ease',
+                  }} />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
