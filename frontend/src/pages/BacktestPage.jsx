@@ -155,7 +155,7 @@ export default function BacktestPage() {
 
       {/* ══ 配置面板（无结果且未运行时显示）══ */}
       {!result && !running && (
-        <div style={{ display:'grid', gridTemplateColumns:'360px 1fr', gap:16 }}>
+        <div className="bt-config-grid">
           {/* 左：基础参数 */}
           <div>
             <div className="card mb-12">
@@ -399,12 +399,43 @@ export default function BacktestPage() {
             />
           </div>
 
-          <div className="stat-grid" style={{ gridTemplateColumns:'repeat(4,1fr)' }} >
+          {/* 第二行：交易统计 */}
+          <div className="stat-grid stat-grid-4 mt-1">
             <StatCard icon={BarChart2} label="总交易次数" value={result.total_trades} sub="笔" />
             <StatCard label="手续费" value={`$${result.total_fees_paid?.toFixed(2)}`} color="var(--red)" />
-            <StatCard label="K线数量" value={result.candle_count?.toLocaleString()} sub={`${result.timeframe}`} />
-            <StatCard label="回测区间" value={`${result.start_date} → ${result.end_date}`} />
+            <StatCard label="K线数量" value={result.candle_count?.toLocaleString()} sub={result.timeframe} />
+            <StatCard label="回测区间" value={`${result.start_date?.slice(0,7)} → ${result.end_date?.slice(0,7)}`} />
           </div>
+
+          {/* 第三行：高级风险指标 */}
+          {(result.sharpe_ratio != null) && (
+            <div className="stat-grid stat-grid-4 mt-1 mb-16">
+              <StatCard
+                label="夏普比率"
+                value={result.sharpe_ratio?.toFixed(3)}
+                sub="年化，越高越好"
+                color={result.sharpe_ratio >= 1 ? 'var(--green)' : result.sharpe_ratio >= 0 ? 'var(--yellow)' : 'var(--red)'}
+              />
+              <StatCard
+                label="Sortino 比率"
+                value={result.sortino_ratio?.toFixed(3)}
+                sub="下行波动率"
+                color={result.sortino_ratio >= 1 ? 'var(--green)' : result.sortino_ratio >= 0 ? 'var(--yellow)' : 'var(--red)'}
+              />
+              <StatCard
+                label="Calmar 比率"
+                value={result.calmar_ratio?.toFixed(3)}
+                sub="年化收益/最大回撤"
+                color={result.calmar_ratio >= 1 ? 'var(--green)' : result.calmar_ratio >= 0 ? 'var(--yellow)' : 'var(--red)'}
+              />
+              <StatCard
+                label="盈亏比"
+                value={result.profit_factor?.toFixed(2)}
+                sub={`均盈 ${result.avg_win_pct?.toFixed(2)}% / 均亏 ${result.avg_loss_pct?.toFixed(2)}%`}
+                color={result.profit_factor >= 1.5 ? 'var(--green)' : result.profit_factor >= 1 ? 'var(--yellow)' : 'var(--red)'}
+              />
+            </div>
+          )}
 
           {/* 权益曲线 */}
           {eqData.length > 1 && (

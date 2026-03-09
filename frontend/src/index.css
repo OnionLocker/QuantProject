@@ -379,3 +379,114 @@ hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 }
 .recharts-cartesian-grid-horizontal line,
 .recharts-cartesian-grid-vertical line { stroke: var(--border) !important; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   移动端响应式 (< 768px)
+══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  /* 布局：侧边栏收起为底部导航栏 */
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 52px;
+    grid-template-areas:
+      "main"
+      "sidebar";
+  }
+  .layout.sidebar-open {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 52px;
+  }
+
+  /* 侧边栏变底部导航 */
+  .sidebar {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-around;
+    padding: 0;
+    border-right: none;
+    border-top: 1px solid var(--border);
+    width: 100%;
+    overflow-x: auto;
+  }
+  .layout.sidebar-open .sidebar {
+    flex-direction: row;
+    align-items: center;
+    padding: 0;
+  }
+  .sidebar-logo { display: none; }
+  .sidebar-bottom { display: none; }
+  .nav-item {
+    width: 52px; height: 52px;
+    margin: 0;
+    border-radius: 0;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 10px;
+  }
+  .layout.sidebar-open .nav-item {
+    width: 52px; height: 52px;
+    padding: 0;
+    justify-content: center;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .nav-item.active::before { display: none; }
+  .nav-item.active { border-top: 2px solid var(--blue); }
+  .nav-label { display: block; font-size: 10px; }
+
+  /* 顶栏隐藏 */
+  .topbar { display: none; }
+
+  /* 主内容 */
+  .main-content { padding: 14px 12px; }
+
+  /* 统计格：小屏 2列 */
+  .stat-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+  .stat-grid-3 { grid-template-columns: repeat(2, 1fr) !important; }
+
+  /* 网格：强制单列 */
+  .grid-2, .grid-3, .grid-4 {
+    grid-template-columns: 1fr !important;
+  }
+  .form-grid-2, .form-grid-3 {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* 回测配置面板：强制单列 */
+  [style*="gridTemplateColumns: '360px 1fr'"],
+  [style*="grid-template-columns: 360px"] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* 页面标题 */
+  .page-header { flex-wrap: wrap; gap: 8px; }
+  .page-title  { font-size: 15px; }
+
+  /* 卡片 */
+  .card { border-radius: 6px; }
+  .card-header { font-size: 12px; }
+
+  /* 表格横向滚动 */
+  table { font-size: 11px; }
+  th, td { padding: 7px 8px; }
+
+  /* 按钮 */
+  .btn-sm { padding: 4px 8px; font-size: 11px; }
+}
+
+/* 平板端 (768px ~ 1024px) */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .stat-grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .main-content { padding: 16px 18px; }
+  .layout { grid-template-columns: 56px 1fr; }
+}
+
+/* 回测配置双栏 → 移动端单栏 */
+.bt-config-grid {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 16px;
+}
+@media (max-width: 1024px) {
+  .bt-config-grid { grid-template-columns: 1fr; }
+}

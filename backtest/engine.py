@@ -427,6 +427,59 @@ def run_backtest(
     win_rate = winning_trades / total_trades * 100 if total_trades > 0 else 0.0
     roi      = (balance - initial_capital) / initial_capital * 100
 
+    # ── 高级统计指标 ─────────────────────────────────────────────────────────
+    import math as _math
+
+    # 每笔交易收益率序列
+    trade_returns = [t["pnl"] / initial_capital for t in trades if t.get("pnl") is not None]
+
+    # 夏普比率（年化，假设无风险利率 0，按交易笔数年化）
+    sharpe_ratio = 0.0
+    if len(trade_returns) >= 2:
+        mean_r = sum(trade_returns) / len(trade_returns)
+        std_r  = (_math.sqrt(sum((r - mean_r) ** 2 for r in trade_returns) / (len(trade_returns) - 1))
+                  if len(trade_returns) > 1 else 0)
+        if std_r > 0:
+            # 年化因子：假设每年约 252 个交易日，每日平均交易次数
+            days_total = max(1, (datetime.strptime(end_date, "%Y-%m-%d") -
+                                 datetime.strptime(start_date, "%Y-%m-%d")).days)
+            trades_per_year = len(trade_returns) / days_total * 365
+            sharpe_ratio = round((mean_r / std_r) * _math.sqrt(trades_per_year), 3)
+
+    # Sortino 比率（只用下行波动率）
+    sortino_ratio = 0.0
+    if len(trade_returns) >= 2:
+        mean_r    = sum(trade_returns) / len(trade_returns)
+        neg_rets  = [r for r in trade_returns if r < 0]
+        if neg_rets:
+            downside_std = _math.sqrt(sum(r ** 2 for r in neg_rets) / len(neg_rets))
+            if downside_std > 0:
+                days_total = max(1, (datetime.strptime(end_date, "%Y-%m-%d") -
+                                     datetime.strptime(start_date, "%Y-%m-%d")).days)
+                trades_per_year = len(trade_returns) / days_total * 365
+                sortino_ratio = round((mean_r / downside_std) * _math.sqrt(trades_per_year), 3)
+
+    # Calmar 比率（年化收益 / 最大回撤）
+    calmar_ratio = 0.0
+    if max_drawdown > 0:
+        days_total     = max(1, (datetime.strptime(end_date, "%Y-%m-%d") -
+                                 datetime.strptime(start_date, "%Y-%m-%d")).days)
+        annualized_roi = roi / 100 * (365 / days_total)
+        calmar_ratio   = round(annualized_roi / (max_drawdown / 100), 3)
+
+    # 盈亏比（平均盈利 / 平均亏损）
+    wins  = [t["pnl"] for t in trades if t.get("pnl") is not None and t["pnl"] > 0]
+    loses = [t["pnl"] for t in trades if t.get("pnl") is not None and t["pnl"] < 0]
+    profit_factor = 0.0
+    avg_win_pct   = 0.0
+    avg_loss_pct  = 0.0
+    if wins and loses:
+        avg_win  = sum(wins)  / len(wins)
+        avg_loss = abs(sum(loses) / len(loses))
+        profit_factor = round(avg_win / avg_loss, 3) if avg_loss > 0 else 0.0
+        avg_win_pct   = round(avg_win  / initial_capital * 100, 3)
+        avg_loss_pct  = round(avg_loss / initial_capital * 100, 3)
+
     # 精简资金曲线：最多返回 200 个点（避免响应体过大）
     if len(equity_curve) > 200:
         step = len(equity_curve) // 200
@@ -491,6 +544,13 @@ def run_backtest(
         "slippage":              SLIPPAGE,
         # 市场状态分布（ADAPTIVE 策略特有，其他策略为空 {}）
         "regime_stats":          regime_stats,
+        # 高级风险指标
+        "sharpe_ratio":          sharpe_ratio,
+        "sortino_ratio":         sortino_ratio,
+        "calmar_ratio":          calmar_ratio,
+        "profit_factor":         profit_factor,
+        "avg_win_pct":           avg_win_pct,
+        "avg_loss_pct":          avg_loss_pct,
     }
 
 
