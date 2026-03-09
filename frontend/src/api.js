@@ -35,9 +35,11 @@ export const authApi = {
 }
 
 export const keysApi = {
-  save: (data) => api.post('/api/keys/save', data),
-  status: () => api.get('/api/keys/status'),
-  validate: () => api.get('/api/keys/validate'),
+  save:        (data) => api.post('/api/keys/save', data),
+  status:      ()     => api.get('/api/keys/status'),
+  validate:    ()     => api.get('/api/keys/validate'),
+  liveBalance: ()     => api.get('/api/keys/live-balance'),
+  reset:       ()     => api.delete('/api/keys/reset'),
 }
 
 export const botApi = {

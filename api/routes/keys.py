@@ -135,6 +135,33 @@ def validate_key(user=Depends(get_current_user)):
         raise HTTPException(status_code=502, detail=f"验证请求失败：{e}")
 
 
+@router.get("/live-balance", summary="从 OKX 实时拉取账户余额")
+def live_balance(user=Depends(get_current_user)):
+    """直接调用 OKX 接口获取最新 USDT 余额，不依赖数据库历史记录。"""
+    ex = get_user_exchange(user["id"])
+    try:
+        bal = ex.fetch_balance()
+        usdt = bal.get("USDT", {})
+        return {
+            "total": usdt.get("total", 0),
+            "free":  usdt.get("free",  0),
+            "used":  usdt.get("used",  0),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"获取余额失败：{e}")
+
+
+@router.delete("/reset", summary="清除 OKX API Key 配置")
+def reset_keys(user=Depends(get_current_user)):
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM user_api_keys WHERE user_id=?", (user["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "cleared"}
+
+
 def get_user_exchange(user_id: int):
     """根据用户 ID 从数据库取出 API Key，构建 ccxt OKX 实例（不缓存，每次新建）"""
     import ccxt

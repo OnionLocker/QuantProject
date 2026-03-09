@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
-import { dataApi } from '../api'
+import { dataApi, keysApi } from '../api'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer
 } from 'recharts'
-import { TrendingUp, TrendingDown, DollarSign, BarChart2 } from 'lucide-react'
+import { TrendingUp, TrendingDown, DollarSign, BarChart2, RefreshCw } from 'lucide-react'
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null
@@ -19,11 +19,27 @@ const CustomTooltip = ({ active, payload, label }) => {
 }
 
 export default function BalancePage() {
-  const [data, setData] = useState([])
+  const [data, setData]             = useState([])
+  const [live, setLive]             = useState(null)      // { total, free, used }
+  const [liveLoading, setLiveLoading] = useState(false)
+  const [liveErr, setLiveErr]       = useState('')
 
+  // 历史数据
   useEffect(() => {
     dataApi.balance(90).then(r => setData(r.data.reverse()))
   }, [])
+
+  // 实时余额
+  const fetchLive = () => {
+    setLiveLoading(true)
+    setLiveErr('')
+    keysApi.liveBalance()
+      .then(r => setLive(r.data))
+      .catch(err => setLiveErr(err.response?.data?.detail || '获取失败，请检查 API Key'))
+      .finally(() => setLiveLoading(false))
+  }
+
+  useEffect(() => { fetchLive() }, [])
 
   const latest  = data[data.length - 1]?.balance ?? 0
   const first   = data[0]?.balance ?? 0
@@ -33,9 +49,7 @@ export default function BalancePage() {
   const maxBal  = data.length ? Math.max(...data.map(d => d.balance)) : 0
   const minBal  = data.length ? Math.min(...data.map(d => d.balance)) : 0
 
-  // 回撤
-  let maxDD = 0
-  let peak  = 0
+  let maxDD = 0, peak = 0
   for (const d of data) {
     if (d.balance > peak) peak = d.balance
     const dd = peak > 0 ? (peak - d.balance) / peak * 100 : 0
@@ -53,14 +67,58 @@ export default function BalancePage() {
         </div>
       </div>
 
-      {/* 统计卡片 */}
+      {/* ── 实时余额卡片 ── */}
+      <div className="card mb-20">
+        <div className="card-header" style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+          <span style={{ display:'flex', alignItems:'center', gap:6 }}>
+            <DollarSign size={12} /> OKX 实时余额
+          </span>
+          <button
+            className="btn-ghost btn-sm"
+            onClick={fetchLive}
+            disabled={liveLoading}
+            style={{ display:'flex', alignItems:'center', gap:4 }}
+          >
+            <RefreshCw size={12} style={{ animation: liveLoading ? 'spin 1s linear infinite' : 'none' }} />
+            刷新
+          </button>
+        </div>
+
+        {liveErr ? (
+          <div className="alert alert-danger">{liveErr}</div>
+        ) : (
+          <div style={{ display:'flex', gap:24, flexWrap:'wrap', padding:'4px 0 8px' }}>
+            <div>
+              <div className="s-label">总余额</div>
+              <div className="s-value" style={{ fontSize:22 }}>
+                {liveLoading ? '—' : `$${(live?.total ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
+              </div>
+              <div className="s-sub">USDT</div>
+            </div>
+            <div>
+              <div className="s-label">可用</div>
+              <div style={{ fontSize:16, fontWeight:600, color:'var(--green)', marginTop:4 }}>
+                {liveLoading ? '—' : `$${(live?.free ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
+              </div>
+            </div>
+            <div>
+              <div className="s-label">占用（保证金）</div>
+              <div style={{ fontSize:16, fontWeight:600, color:'var(--red)', marginTop:4 }}>
+                {liveLoading ? '—' : `$${(live?.used ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── 历史统计卡片 ── */}
       <div className="stat-grid stat-grid-4 mb-20">
         <div className="stat-cell">
           <div className="s-label" style={{ display:'flex', alignItems:'center', gap:4 }}>
-            <DollarSign size={11} /> 当前余额
+            <DollarSign size={11} /> 上次记录余额
           </div>
           <div className="s-value">${latest.toLocaleString(undefined,{minimumFractionDigits:2})}</div>
-          <div className="s-sub">USDT</div>
+          <div className="s-sub">Bot 最近一次记录</div>
         </div>
         <div className="stat-cell">
           <div className="s-label" style={{ display:'flex', alignItems:'center', gap:4 }}>
@@ -95,10 +153,10 @@ export default function BalancePage() {
         </div>
       </div>
 
-      {/* 面积图 */}
+      {/* ── 面积图 ── */}
       {data.length > 1 ? (
         <div className="card mb-20">
-          <div className="card-header">余额曲线</div>
+          <div className="card-header">Bot 余额记录曲线</div>
           <ResponsiveContainer width="100%" height={240}>
             <AreaChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
               <defs>
@@ -139,12 +197,12 @@ export default function BalancePage() {
         <div className="card mb-20">
           <div className="empty-state">
             <div className="empty-icon">📊</div>
-            <div className="empty-text">暂无数据，Bot 运行后将自动记录每日余额</div>
+            <div className="empty-text">Bot 运行后将自动记录每日余额，曲线将在此显示</div>
           </div>
         </div>
       )}
 
-      {/* 明细表格 */}
+      {/* ── 明细表格 ── */}
       <div className="card">
         <div className="card-header">每日明细</div>
         {data.length === 0 ? (
