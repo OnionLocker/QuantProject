@@ -56,6 +56,22 @@ SUPPORTED_SYMBOLS = [
 SUPPORTED_TIMEFRAMES = ["15m", "1h", "4h", "1d"]
 
 
+# ── 自适应滑点：根据 ATR 占价格比例动态调整 ───────────────────────────────────
+def _adaptive_slippage(atr: float, price: float,
+                       base: float = 0.0002,
+                       scale: float = 0.15) -> float:
+    """
+    滑点 = max(base, atr/price * scale)
+    - 低波动期：接近 base (0.02%)
+    - 高波动期：随 ATR 线性放大，最高 0.5%
+    示例：ATR/price=0.5% → 滑点≈0.075%；ATR/price=2% → 0.3%
+    """
+    if price <= 0 or atr <= 0:
+        return base
+    dynamic = (atr / price) * scale
+    return min(max(dynamic, base), 0.005)   # 最高 0.5%
+
+
 def run_backtest(
     strategy=None,
     symbol: str            = None,
@@ -126,6 +142,15 @@ def run_backtest(
     # ── 对整个 df 一次性预计算指标，避免逐K线重复 rolling ───────────────────
     if hasattr(strategy, "precompute"):
         df = strategy.precompute(df)
+
+    # ── 预计算 ATR（用于自适应滑点，不依赖策略是否计算过）────────────────────
+    if "atr" not in df.columns:
+        _tr = pd.concat([
+            df["high"] - df["low"],
+            (df["high"] - df["close"].shift(1)).abs(),
+            (df["low"]  - df["close"].shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        df["atr"] = _tr.rolling(14).mean()
 
     # 提取市场状态分布统计（ADAPTIVE 策略特有）
     regime_stats = {}
@@ -237,8 +262,10 @@ def run_backtest(
 
         # ── 空仓开仓 ────────────────────────────────────────────────────────
         if position_amount == 0 and action in ("BUY", "SELL") and not bt_rm.is_fused:
-            actual_entry = (c_open * (1 + SLIPPAGE) if action == "BUY"
-                            else c_open * (1 - SLIPPAGE))
+            _atr_val   = candle.get("atr", 0) if hasattr(candle, "get") else (candle["atr"] if "atr" in candle.index else 0)
+            _slip      = _adaptive_slippage(_atr_val, c_open, SLIPPAGE) if slippage is None else SLIPPAGE
+            actual_entry = (c_open * (1 + _slip) if action == "BUY"
+                            else c_open * (1 - _slip))
 
             contracts = rm.calculate_position_size(
                 balance       = balance,
@@ -290,6 +317,8 @@ def run_backtest(
         # ── 多单平仓检测 ─────────────────────────────────────────────────────
         elif position_amount > 0 and position_side == "long":
             close_price, close_reason = 0.0, ""
+            _atr_c = candle["atr"] if "atr" in candle.index else 0
+            _close_slip = _adaptive_slippage(_atr_c, c_open, SLIPPAGE) if slippage is None else SLIPPAGE
 
             sl_hit = c_low  <= active_sl
             tp_hit = c_high >= active_tp
@@ -300,16 +329,16 @@ def run_backtest(
                 dist_sl = entry_price - active_sl
                 dist_tp = active_tp  - entry_price
                 if dist_tp <= dist_sl:
-                    close_price, close_reason = active_tp * (1 + SLIPPAGE), "止盈"
+                    close_price, close_reason = active_tp * (1 + _close_slip), "止盈"
                     winning_trades += 1
                 else:
-                    close_price, close_reason = active_sl * (1 - SLIPPAGE), "止损"
+                    close_price, close_reason = active_sl * (1 - _close_slip), "止损"
                     losing_trades += 1
             elif sl_hit:
-                close_price, close_reason = active_sl * (1 - SLIPPAGE), "止损"
+                close_price, close_reason = active_sl * (1 - _close_slip), "止损"
                 losing_trades += 1
             elif tp_hit:
-                close_price, close_reason = active_tp * (1 + SLIPPAGE), "止盈"
+                close_price, close_reason = active_tp * (1 + _close_slip), "止盈"
                 winning_trades += 1
             elif action == "SELL":
                 close_price, close_reason = c_close, "反转平多"
@@ -359,6 +388,8 @@ def run_backtest(
         # ── 空单平仓检测 ─────────────────────────────────────────────────────
         elif position_amount > 0 and position_side == "short":
             close_price, close_reason = 0.0, ""
+            _atr_c = candle["atr"] if "atr" in candle.index else 0
+            _close_slip = _adaptive_slippage(_atr_c, c_open, SLIPPAGE) if slippage is None else SLIPPAGE
 
             sl_hit = c_high >= active_sl
             tp_hit = c_low  <= active_tp
@@ -369,16 +400,16 @@ def run_backtest(
                 dist_sl = active_sl  - entry_price
                 dist_tp = entry_price - active_tp
                 if dist_tp <= dist_sl:
-                    close_price, close_reason = active_tp * (1 - SLIPPAGE), "止盈"
+                    close_price, close_reason = active_tp * (1 - _close_slip), "止盈"
                     winning_trades += 1
                 else:
-                    close_price, close_reason = active_sl * (1 + SLIPPAGE), "止损"
+                    close_price, close_reason = active_sl * (1 + _close_slip), "止损"
                     losing_trades += 1
             elif sl_hit:
-                close_price, close_reason = active_sl * (1 + SLIPPAGE), "止损"
+                close_price, close_reason = active_sl * (1 + _close_slip), "止损"
                 losing_trades += 1
             elif tp_hit:
-                close_price, close_reason = active_tp * (1 - SLIPPAGE), "止盈"
+                close_price, close_reason = active_tp * (1 - _close_slip), "止盈"
                 winning_trades += 1
             elif action == "BUY":
                 close_price, close_reason = c_close, "反转平空"
@@ -542,6 +573,7 @@ def run_backtest(
         "risk_pct":              RISK_PCT,
         "fee_rate":              FEE_RATE,
         "slippage":              SLIPPAGE,
+        "adaptive_slippage":     slippage is None,  # True=自适应，False=固定
         # 市场状态分布（ADAPTIVE 策略特有，其他策略为空 {}）
         "regime_stats":          regime_stats,
         # 高级风险指标

@@ -43,6 +43,7 @@ selector:
   strategy_bull:    "BULL"
   strategy_bear:    "BEAR"
   strategy_ranging: "RANGE"
+  strategy_breakout: "BIG_CANDLE"   # ADX>40 强势突破行情使用大阳线策略
 
   # 各策略的参数覆盖（不填则使用策略默认值）
   strategy_params:
@@ -66,6 +67,13 @@ selector:
       rsi_ob:        65
       rsi_os:        35
       cooldown:      5
+    BIG_CANDLE:
+      body_pct:      1.5
+      vol_mult:      1.5
+      sl_mode:       0
+      rr1:           2.0
+      cooldown:      5
+      enable_short:  1
 
 api:
   host: "0.0.0.0"

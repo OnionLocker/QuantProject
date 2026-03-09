@@ -99,6 +99,19 @@ if [ -f "$SERVICE_FILE" ] && command -v systemctl &>/dev/null; then
   systemctl enable quantbot
   systemctl start quantbot
   echo "✅ systemd service 已安装并启动"
+
+  # 安装数据库备份定时器
+  BACKUP_SERVICE="$PROJECT_DIR/systemd/quantbot-backup.service"
+  BACKUP_TIMER="$PROJECT_DIR/systemd/quantbot-backup.timer"
+  if [ -f "$BACKUP_SERVICE" ] && [ -f "$BACKUP_TIMER" ]; then
+    sed "s|/root/QuantProject|$PROJECT_DIR|g" "$BACKUP_SERVICE" > /etc/systemd/system/quantbot-backup.service
+    sed -i "s|/usr/bin/python3|$(which $PYTHON)|g" /etc/systemd/system/quantbot-backup.service
+    cp "$BACKUP_TIMER" /etc/systemd/system/quantbot-backup.timer
+    systemctl daemon-reload
+    systemctl enable quantbot-backup.timer
+    systemctl start quantbot-backup.timer
+    echo "✅ 数据库备份定时器已安装（每天 00:05 执行）"
+  fi
 else
   # 降级到 nohup
   echo "⚠️  未检测到 systemd，使用 nohup 启动..."
@@ -124,6 +137,8 @@ if systemctl is-active --quiet quantbot 2>/dev/null || pgrep -f "uvicorn api.ser
   echo "   📋 日志：journalctl -u quantbot -f"
   echo "          或：tail -f logs/server.log"
   echo "   🔄 重启：systemctl restart quantbot"
+  echo "   💾 备份：python3 scripts/backup_db.py"
+  echo "          备份文件位置：backups/"
   echo "========================================"
 else
   echo ""

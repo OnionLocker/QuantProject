@@ -32,10 +32,11 @@ import pandas as pd
 logger = logging.getLogger("strategy_selector")
 
 # 市场状态枚举
-REGIME_BULL    = "bull"
-REGIME_BEAR    = "bear"
-REGIME_RANGING = "ranging"
-REGIME_UNKNOWN = "unknown"
+REGIME_BULL     = "bull"
+REGIME_BEAR     = "bear"
+REGIME_RANGING  = "ranging"
+REGIME_UNKNOWN  = "unknown"
+REGIME_BREAKOUT = "breakout"   # 强势突破（ADX极高+大K线）→ BIG_CANDLE
 
 
 class MarketRegimeSelector:
@@ -73,9 +74,10 @@ class MarketRegimeSelector:
 
         # 各 regime 对应的策略名（可在 config.yaml 覆盖）
         self.strategy_map = {
-            REGIME_BULL:    sc.get("strategy_bull",    "BULL"),
-            REGIME_BEAR:    sc.get("strategy_bear",    "BEAR"),
-            REGIME_RANGING: sc.get("strategy_ranging", "RANGE"),
+            REGIME_BULL:     sc.get("strategy_bull",     "BULL"),
+            REGIME_BEAR:     sc.get("strategy_bear",     "BEAR"),
+            REGIME_RANGING:  sc.get("strategy_ranging",  "RANGE"),
+            REGIME_BREAKOUT: sc.get("strategy_breakout", "BIG_CANDLE"),
         }
 
         # 状态持久化（防抖）
@@ -185,6 +187,9 @@ class MarketRegimeSelector:
 
         # 决策
         confidence = min(abs(score) / 4.0, 1.0)
+        # ADX 极强（>40）且价格在长期均线上方 → 强势突破 regime
+        if adx_val > 40 and score >= 1.5:
+            return REGIME_BREAKOUT, min(confidence * 1.2, 1.0)
         if score >= 1.5:
             return REGIME_BULL, confidence
         elif score <= -1.5:
@@ -245,7 +250,7 @@ class MarketRegimeSelector:
         news_regime, news_conf = self._get_news_regime()
 
         # ── 加权投票 ─────────────────────────────────────────────────────────
-        votes = {REGIME_BULL: 0.0, REGIME_BEAR: 0.0, REGIME_RANGING: 0.0}
+        votes = {REGIME_BULL: 0.0, REGIME_BEAR: 0.0, REGIME_RANGING: 0.0, REGIME_BREAKOUT: 0.0}
 
         # 技术面投票
         if tech_regime != REGIME_UNKNOWN:

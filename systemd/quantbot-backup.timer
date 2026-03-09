@@ -1,0 +1,13 @@
+[Unit]
+Description=QuantProject Database Backup Timer
+Requires=quantbot-backup.service
+
+[Timer]
+# 每天凌晨 00:05 执行
+OnCalendar=*-*-* 00:05:00
+# 系统启动后若错过了，15分钟内补跑一次
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

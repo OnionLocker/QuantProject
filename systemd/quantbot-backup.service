@@ -1,0 +1,11 @@
+[Unit]
+Description=QuantProject Database Backup
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/QuantProject
+ExecStart=/usr/bin/python3 /root/QuantProject/scripts/backup_db.py
+StandardOutput=append:/root/QuantProject/logs/backup.log
+StandardError=append:/root/QuantProject/logs/backup.log
