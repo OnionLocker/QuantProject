@@ -72,9 +72,16 @@ def init_db():
             risk_pct        REAL    DEFAULT NULL,
             strategy_name   TEXT    DEFAULT NULL,
             strategy_params TEXT    DEFAULT NULL,
+            risk_config     TEXT    DEFAULT NULL,
             updated_at      TEXT    DEFAULT (datetime('now'))
         )
     ''')
+    # 兼容旧数据库：若 risk_config 列不存在则添加
+    try:
+        c.execute("ALTER TABLE user_config ADD COLUMN risk_config TEXT DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass  # 列已存在，忽略
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS trade_history (
@@ -249,6 +256,7 @@ def save_user_config(user_id: int, config: dict):
         if strategy_params is not None and isinstance(strategy_params, dict):
             strategy_params = json.dumps(strategy_params, ensure_ascii=False)
 
+        _RISK_KEYS = ("max_consecutive_losses", "daily_loss_limit_pct", "max_trade_amount")
         if row:
             fields = []
             values = []
@@ -259,6 +267,18 @@ def save_user_config(user_id: int, config: dict):
             if strategy_params is not None:
                 fields.append("strategy_params=?")
                 values.append(strategy_params)
+            # 风控参数：存入 JSON 字段（复用 strategy_params 思路，用单独字段更清晰）
+            risk_cfg = {k: config[k] for k in _RISK_KEYS if k in config}
+            if risk_cfg:
+                # 读取已有 risk_config，合并后写回
+                existing_risk = {}
+                try:
+                    existing_risk = json.loads(row["risk_config"] or "{}") if "risk_config" in row.keys() else {}
+                except Exception:
+                    pass
+                existing_risk.update(risk_cfg)
+                fields.append("risk_config=?")
+                values.append(json.dumps(existing_risk))
             fields.append("updated_at=datetime('now')")
             values.append(user_id)
             conn.execute(
@@ -266,11 +286,12 @@ def save_user_config(user_id: int, config: dict):
                 values
             )
         else:
+            risk_cfg = {k: config[k] for k in _RISK_KEYS if k in config}
             conn.execute('''
                 INSERT INTO user_config
                   (user_id, symbol, timeframe, leverage, risk_pct,
-                   strategy_name, strategy_params, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   strategy_name, strategy_params, risk_config, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ''', (
                 user_id,
                 config.get("symbol"),
@@ -279,6 +300,7 @@ def save_user_config(user_id: int, config: dict):
                 config.get("risk_pct"),
                 config.get("strategy_name"),
                 strategy_params,
+                json.dumps(risk_cfg) if risk_cfg else None,
             ))
         conn.commit()
     finally:
@@ -309,14 +331,27 @@ def load_user_config(user_id: int) -> dict:
     else:
         params = {}
 
+    # 读取风控配置
+    risk_cfg = {}
+    try:
+        keys = [d[0] for d in row.description] if hasattr(row, 'description') else list(row.keys())
+        if "risk_config" in keys and row["risk_config"]:
+            risk_cfg = json.loads(row["risk_config"])
+    except Exception:
+        pass
+
     return {
-        "symbol":          row["symbol"],
-        "timeframe":       row["timeframe"],
-        "leverage":        row["leverage"],
-        "risk_pct":        row["risk_pct"],
-        "strategy_name":   row["strategy_name"],
-        "strategy_params": params,
-        "updated_at":      row["updated_at"],
+        "symbol":                  row["symbol"],
+        "timeframe":               row["timeframe"],
+        "leverage":                row["leverage"],
+        "risk_pct":                row["risk_pct"],
+        "strategy_name":           row["strategy_name"],
+        "strategy_params":         params,
+        "updated_at":              row["updated_at"],
+        # 风控参数（若未配置则为 None，runner.py 会 fallback config.yaml）
+        "max_consecutive_losses":  risk_cfg.get("max_consecutive_losses"),
+        "daily_loss_limit_pct":    risk_cfg.get("daily_loss_limit_pct"),
+        "max_trade_amount":        risk_cfg.get("max_trade_amount"),
     }
 
 

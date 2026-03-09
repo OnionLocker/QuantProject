@@ -16,12 +16,16 @@ router = APIRouter(prefix="/api/user-config", tags=["user_config"])
 
 
 class UserConfigBody(BaseModel):
-    symbol:          Optional[str]   = None
-    timeframe:       Optional[str]   = None
-    leverage:        Optional[float] = None
-    risk_pct:        Optional[float] = None
-    strategy_name:   Optional[str]   = None
-    strategy_params: Optional[dict]  = None
+    symbol:                   Optional[str]   = None
+    timeframe:                Optional[str]   = None
+    leverage:                 Optional[float] = None
+    risk_pct:                 Optional[float] = None
+    strategy_name:            Optional[str]   = None
+    strategy_params:          Optional[dict]  = None
+    # 风控参数
+    max_consecutive_losses:   Optional[int]   = None
+    daily_loss_limit_pct:     Optional[float] = None
+    max_trade_amount:         Optional[float] = None
 
 
 @router.get("", summary="获取当前用户的个性化配置")
@@ -57,13 +61,24 @@ def save_config(body: UserConfigBody, user=Depends(get_current_user)):
         if body.strategy_name not in known:
             raise HTTPException(status_code=400, detail=f"未知策略: {body.strategy_name}")
 
+    # 校验风控参数
+    if body.max_consecutive_losses is not None and not (1 <= body.max_consecutive_losses <= 20):
+        raise HTTPException(status_code=400, detail="连续亏损熔断次数范围: 1~20")
+    if body.daily_loss_limit_pct is not None and not (0.01 <= body.daily_loss_limit_pct <= 0.5):
+        raise HTTPException(status_code=400, detail="日亏损上限范围: 1%~50%")
+    if body.max_trade_amount is not None and not (10 <= body.max_trade_amount <= 100000):
+        raise HTTPException(status_code=400, detail="单笔最大金额范围: 10~100000 USDT")
+
     config = {}
-    if body.symbol          is not None: config["symbol"]          = body.symbol
-    if body.timeframe       is not None: config["timeframe"]       = body.timeframe
-    if body.leverage        is not None: config["leverage"]        = body.leverage
-    if body.risk_pct        is not None: config["risk_pct"]        = body.risk_pct
-    if body.strategy_name   is not None: config["strategy_name"]   = body.strategy_name
-    if body.strategy_params is not None: config["strategy_params"] = body.strategy_params
+    if body.symbol                 is not None: config["symbol"]                 = body.symbol
+    if body.timeframe              is not None: config["timeframe"]              = body.timeframe
+    if body.leverage               is not None: config["leverage"]               = body.leverage
+    if body.risk_pct               is not None: config["risk_pct"]               = body.risk_pct
+    if body.strategy_name          is not None: config["strategy_name"]          = body.strategy_name
+    if body.strategy_params        is not None: config["strategy_params"]        = body.strategy_params
+    if body.max_consecutive_losses is not None: config["max_consecutive_losses"] = body.max_consecutive_losses
+    if body.daily_loss_limit_pct   is not None: config["daily_loss_limit_pct"]   = body.daily_loss_limit_pct
+    if body.max_trade_amount       is not None: config["max_trade_amount"]       = body.max_trade_amount
 
     save_user_config(user["id"], config)
     return {"status": "saved", "config": config}

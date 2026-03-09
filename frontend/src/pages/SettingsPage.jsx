@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { keysApi, notifyApi, botApi } from '../api'
-import { KeyRound, Bell, Eye, EyeOff, Check, Send, Trash2, RotateCcw } from 'lucide-react'
+import { keysApi, notifyApi, botApi, userConfigApi } from '../api'
+import { KeyRound, Bell, Eye, EyeOff, Check, Send, Trash2, RotateCcw, ShieldAlert } from 'lucide-react'
 
 function Section({ icon: Icon, title, children }) {
   return (
@@ -332,6 +332,95 @@ export default function SettingsPage() {
           </div>
         )}
       </Section>
+
+      {/* ── 风控参数 ── */}
+      <RiskSection botRunning={botRunning} />
     </div>
+  )
+}
+
+function RiskSection({ botRunning }) {
+  const [cfg,     setCfg]     = useState(null)
+  const [form,    setForm]    = useState({ max_consecutive_losses:'', daily_loss_limit_pct:'', max_trade_amount:'' })
+  const [saving,  setSaving]  = useState(false)
+  const [msg,     setMsg]     = useState('')
+
+  useEffect(() => {
+    userConfigApi.get().then(r => {
+      const c = r.data?.config || {}
+      setCfg(c)
+      setForm({
+        max_consecutive_losses: c.max_consecutive_losses ?? '',
+        daily_loss_limit_pct:   c.daily_loss_limit_pct   != null ? (c.daily_loss_limit_pct * 100).toFixed(1) : '',
+        max_trade_amount:       c.max_trade_amount        ?? '',
+      })
+    }).catch(() => {})
+  }, [])
+
+  const handleSave = async e => {
+    e.preventDefault()
+    setSaving(true); setMsg('')
+    try {
+      const body = {}
+      if (form.max_consecutive_losses !== '') body.max_consecutive_losses = parseInt(form.max_consecutive_losses)
+      if (form.daily_loss_limit_pct   !== '') body.daily_loss_limit_pct   = parseFloat(form.daily_loss_limit_pct) / 100
+      if (form.max_trade_amount       !== '') body.max_trade_amount       = parseFloat(form.max_trade_amount)
+      await userConfigApi.save(body)
+      setMsg('✅ 风控参数已保存，下次启动 Bot 生效')
+    } catch(err) {
+      setMsg('❌ 保存失败：' + (err.response?.data?.detail || err.message))
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <Section icon={ShieldAlert} title="风控参数" subtitle="超出限制 Bot 自动暂停，重启后生效">
+      {botRunning && (
+        <div className="alert alert-warning mb-12">
+          Bot 运行中，修改后下次启动时才生效
+        </div>
+      )}
+      <form onSubmit={handleSave}>
+        <div className="form-grid-3">
+          <div className="form-row">
+            <label className="form-label">连续亏损熔断次数</label>
+            <input
+              type="number" min="1" max="20"
+              value={form.max_consecutive_losses}
+              onChange={e => setForm(f => ({...f, max_consecutive_losses: e.target.value}))}
+              placeholder="默认 3 次"
+            />
+            <div className="form-hint">连续亏损 N 笔后自动暂停</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">日亏损上限 (%)</label>
+            <input
+              type="number" min="1" max="50" step="0.5"
+              value={form.daily_loss_limit_pct}
+              onChange={e => setForm(f => ({...f, daily_loss_limit_pct: e.target.value}))}
+              placeholder="默认 5%"
+            />
+            <div className="form-hint">当日亏损超过本金此比例后暂停</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">单笔最大金额 (USDT)</label>
+            <input
+              type="number" min="10" max="100000"
+              value={form.max_trade_amount}
+              onChange={e => setForm(f => ({...f, max_trade_amount: e.target.value}))}
+              placeholder="默认 1000 U"
+            />
+            <div className="form-hint">单笔开仓名义价值上限</div>
+          </div>
+        </div>
+        <button type="submit" className="btn-primary btn-sm" disabled={saving} style={{ marginTop:4 }}>
+          {saving ? <span className="spinner" /> : '保存风控参数'}
+        </button>
+      </form>
+      {msg && (
+        <div className={`alert ${msg.startsWith('✅') ? 'alert-success' : 'alert-danger'} mt-12`}>
+          {msg}
+        </div>
+      )}
+    </Section>
   )
 }

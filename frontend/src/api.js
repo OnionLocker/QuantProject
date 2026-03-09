@@ -70,4 +70,10 @@ export const notifyApi = {
 // 向后兼容旧名称
 export const tgApi = notifyApi
 
+export const userConfigApi = {
+  get:   ()     => api.get('/api/user-config'),
+  save:  (data) => api.post('/api/user-config/save', data),
+  reset: ()     => api.delete('/api/user-config/reset'),
+}
+
 export default api

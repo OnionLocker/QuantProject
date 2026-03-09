@@ -88,15 +88,78 @@ async def ws_status(websocket: WebSocket, token: str = ""):
             conn.close()
             ps = json.loads(row[0]) if row else {}
 
+            # 拉取实时价格（用于浮动盈亏计算）
+            current_price = None
+            try:
+                from api.routes.keys import get_user_exchange
+                ex = get_user_exchange(user_id)
+                symbol = ps.get("symbol") or "BTC/USDT:USDT"
+                ticker = ex.fetch_ticker(symbol)
+                current_price = float(ticker.get("last") or ticker.get("close") or 0) or None
+            except Exception:
+                pass
+
+            # 浮动盈亏计算
+            unrealized_pnl = None
+            if current_price and ps.get("position_amount", 0) > 0 and ps.get("entry_price", 0) > 0:
+                is_long = ps.get("position_side") == "long"
+                CONTRACT_SIZE = 0.01
+                gross = ((current_price - ps["entry_price"]) if is_long
+                         else (ps["entry_price"] - current_price))
+                unrealized_pnl = round(gross * ps["position_amount"] * CONTRACT_SIZE, 2)
+
+            # 今日盈亏 & 今日交易次数
+            today_pnl    = 0.0
+            today_trades = 0
+            try:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                conn2 = sqlite3.connect(DB_PATH)
+                row2  = conn2.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(pnl),0) FROM trade_history "
+                    "WHERE user_id=? AND timestamp LIKE ? AND action='平仓'",
+                    (user_id, today_str + "%")
+                ).fetchone()
+                conn2.close()
+                if row2:
+                    today_trades = row2[0]
+                    today_pnl    = round(float(row2[1]), 2)
+            except Exception:
+                pass
+
+            # 运行时长
+            uptime_str = ""
+            if bs.get("started_at"):
+                try:
+                    started = datetime.strptime(bs["started_at"], "%Y-%m-%d %H:%M:%S")
+                    delta   = datetime.now() - started
+                    h, rem  = divmod(int(delta.total_seconds()), 3600)
+                    m       = rem // 60
+                    uptime_str = f"{h}h {m}m"
+                except Exception:
+                    pass
+
             await websocket.send_json({
-                "ts":             datetime.now().isoformat(),
-                "running":        bs.get("running", False),
-                "fused":          bs.get("fused", False),
-                "position_side":  ps.get("position_side"),
-                "position_amount":ps.get("position_amount", 0),
-                "entry_price":    ps.get("entry_price", 0),
-                "active_sl":      ps.get("active_sl", 0),
-                "active_tp1":     ps.get("active_tp1", 0),
+                "ts":                datetime.now().isoformat(),
+                "running":           bs.get("running", False),
+                "fused":             bs.get("fused", False),
+                "consecutive_losses":bs.get("consecutive_losses", 0),
+                "crash_count":       bs.get("crash_count", 0),
+                "started_at":        bs.get("started_at"),
+                "uptime":            uptime_str,
+                "last_error":        bs.get("last_error"),
+                "position_side":     ps.get("position_side"),
+                "position_amount":   ps.get("position_amount", 0),
+                "entry_price":       ps.get("entry_price", 0),
+                "active_sl":         ps.get("active_sl", 0),
+                "active_tp1":        ps.get("active_tp1", 0),
+                "active_tp2":        ps.get("active_tp2", 0),
+                "entry_time":        ps.get("entry_time", ""),
+                "strategy_name":     ps.get("strategy_name", ""),
+                "signal_reason":     ps.get("signal_reason", ""),
+                "current_price":     current_price,
+                "unrealized_pnl":    unrealized_pnl,
+                "today_trades":      today_trades,
+                "today_pnl":         today_pnl,
             })
             await asyncio.sleep(5)
     except WebSocketDisconnect:
