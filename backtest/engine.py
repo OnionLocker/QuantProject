@@ -148,6 +148,16 @@ def run_backtest(
 
     equity_curve = []   # [{date, balance}] 每笔交易后记录一个点
 
+    # ── 回测内熔断模拟（与实盘风控保持一致）────────────────────────────────
+    # 使用独立实例，避免污染全局 rm
+    bt_rm = RiskManager(
+        max_trade_amount       = DEFAULT_MAX_AMT,
+        max_consecutive_losses = rm.max_consecutive_losses,
+        daily_loss_limit_pct   = rm.daily_loss_limit_pct,
+    )
+    bt_rm.set_daily_start_balance(initial_capital)
+    fuse_triggered_count = 0   # 统计熔断触发次数
+
     if not silent:
         print(f"\n🚀 回测: {strategy.name} | {symbol} {timeframe} | "
               f"{start_date} → {end_date} | 初始资金: {initial_capital} U")
@@ -194,6 +204,11 @@ def run_backtest(
             if pct // 10 != last_pct_report // 10:
                 last_pct_report = pct
                 progress_cb(pct)
+        # ── 熔断检查：与实盘逻辑保持一致，熔断时跳过开仓 ─────────────────
+        if bt_rm.is_fused:
+            # 有持仓时继续监控平仓，但不开新仓
+            pass
+
         candle           = df.iloc[i]
         ts               = candle.name
         c_open           = candle["open"]
@@ -219,7 +234,7 @@ def run_backtest(
             max_drawdown = dd
 
         # ── 空仓开仓 ────────────────────────────────────────────────────────
-        if position_amount == 0 and action in ("BUY", "SELL"):
+        if position_amount == 0 and action in ("BUY", "SELL") and not bt_rm.is_fused:
             actual_entry = (c_open * (1 + SLIPPAGE) if action == "BUY"
                             else c_open * (1 - SLIPPAGE))
 
@@ -289,6 +304,15 @@ def run_backtest(
                 balance      += gross
                 net_pnl       = gross - (open_fee_paid + close_fee)
 
+                # ── 回测内熔断模拟：通知风控，触发时记录并跳过后续开仓 ──────
+                bt_rm.notify_trade_result(net_pnl, balance)
+                if bt_rm.is_fused:
+                    fuse_triggered_count += 1
+                    if not silent:
+                        tqdm.write(f"[{ts}] 🚨 回测熔断触发（第{fuse_triggered_count}次），跳过后续开仓直至手动恢复")
+                    # 回测中自动恢复熔断（模拟日内结束后恢复）
+                    bt_rm.manual_resume()
+
                 equity_curve.append({
                     "date":    str(ts)[:10],
                     "balance": round(balance, 2),
@@ -340,6 +364,14 @@ def run_backtest(
                 balance      += gross
                 net_pnl       = gross - (open_fee_paid + close_fee)
 
+                # ── 回测内熔断模拟：通知风控，触发时记录并跳过后续开仓 ──────
+                bt_rm.notify_trade_result(net_pnl, balance)
+                if bt_rm.is_fused:
+                    fuse_triggered_count += 1
+                    if not silent:
+                        tqdm.write(f"[{ts}] 🚨 回测熔断触发（第{fuse_triggered_count}次），跳过后续开仓直至手动恢复")
+                    bt_rm.manual_resume()
+
                 equity_curve.append({
                     "date":    str(ts)[:10],
                     "balance": round(balance, 2),
@@ -363,39 +395,46 @@ def run_backtest(
         step = len(equity_curve) // 200
         equity_curve = equity_curve[::step]
 
+    # 修复：回测完成后推送 100% 进度
+    if progress_cb:
+        progress_cb(100)
+
     if not silent:
         print("\n" + "=" * 75)
         print(f"💰 初始: {initial_capital:.2f} | 最终: {balance:.2f}")
         print(f"📈 ROI: {roi:+.2f}% | 最大回撤: {max_drawdown:.2f}%")
         print(f"📊 总交易: {total_trades} | 盈: {winning_trades} | 亏: {losing_trades} | 胜率: {win_rate:.2f}%")
         print(f"💸 总手续费: {total_fees_paid:.2f} U")
+        if fuse_triggered_count > 0:
+            print(f"🚨 回测熔断触发次数: {fuse_triggered_count}")
         print(f"[参数] 品种={symbol} 周期={timeframe} 杠杆={LEVERAGE}x 风险={RISK_PCT*100}%/笔")
 
     return {
-        "status":            "done",
-        "strategy":          strategy.name,
-        "symbol":            symbol,
-        "timeframe":         timeframe,
-        "start_date":        start_date,
-        "end_date":          end_date,
-        "initial_capital":   initial_capital,
-        "final_balance":     round(balance, 2),
-        "roi_pct":           round(roi, 2),
-        "max_drawdown_pct":  round(max_drawdown, 2),
-        "win_rate_pct":      round(win_rate, 2),
-        "total_trades":      total_trades,
-        "winning_trades":    winning_trades,
-        "losing_trades":     losing_trades,
-        "total_fees_paid":   round(total_fees_paid, 2),
-        "equity_curve":      equity_curve,
-        "candle_count":      len(df),
+        "status":                "done",
+        "strategy":              strategy.name,
+        "symbol":                symbol,
+        "timeframe":             timeframe,
+        "start_date":            start_date,
+        "end_date":              end_date,
+        "initial_capital":       initial_capital,
+        "final_balance":         round(balance, 2),
+        "roi_pct":               round(roi, 2),
+        "max_drawdown_pct":      round(max_drawdown, 2),
+        "win_rate_pct":          round(win_rate, 2),
+        "total_trades":          total_trades,
+        "winning_trades":        winning_trades,
+        "losing_trades":         losing_trades,
+        "total_fees_paid":       round(total_fees_paid, 2),
+        "equity_curve":          equity_curve,
+        "candle_count":          len(df),
+        "fuse_triggered_count":  fuse_triggered_count,
         # 执行参数快照（便于结果区展示）
-        "leverage":          LEVERAGE,
-        "risk_pct":          RISK_PCT,
-        "fee_rate":          FEE_RATE,
-        "slippage":          SLIPPAGE,
+        "leverage":              LEVERAGE,
+        "risk_pct":              RISK_PCT,
+        "fee_rate":              FEE_RATE,
+        "slippage":              SLIPPAGE,
         # 市场状态分布（ADAPTIVE 策略特有，其他策略为空 {}）
-        "regime_stats":      regime_stats,
+        "regime_stats":          regime_stats,
     }
 
 

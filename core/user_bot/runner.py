@@ -625,12 +625,13 @@ def run_user_bot(bot_state):
                 if new_strategy is not None:
                     old_name = strategy.name
                     strategy = new_strategy
-                    # K线数可能需要更多，重新拉取
+                    # 新策略可能需要更多K线，重新拉取
                     kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
                     ohlcv = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=kline_limit)
                     df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
                     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
                     df.set_index("timestamp", inplace=True)
+                    current_price = float(df.iloc[-1]["close"])
                     logger.info(
                         f"{tag} 策略热切换: {old_name} → {strategy.name} "
                         f"({regime_result['reason']})"
@@ -645,14 +646,6 @@ def run_user_bot(bot_state):
                             f"新闻面: {regime_result['news_regime']}\n"
                             f"置信度: {regime_result['confidence']:.0%}"
                         )
-            # AUTO模式下若发生切换，df 已在切换块内重新拉取
-            # 非AUTO模式在此处构建 df
-            if not use_auto or selector is None:
-                df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
-                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-                df.set_index("timestamp", inplace=True)
-
-            current_price = float(df.iloc[-1]["close"])
             signal    = strategy.generate_signal(df)
             action    = signal["action"]
             reason    = signal["reason"]
