@@ -137,8 +137,8 @@ export default function BacktestPage() {
         )}
       </div>
 
-      {/* ══ 配置面板（无结果时显示）══ */}
-      {!result && (
+      {/* ══ 配置面板（无结果且未运行时显示）══ */}
+      {!result && !running && (
         <div style={{ display:'grid', gridTemplateColumns:'360px 1fr', gap:16 }}>
           {/* 左：基础参数 */}
           <div>
@@ -311,6 +311,41 @@ export default function BacktestPage() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ══ Running 状态：全屏进度显示（配置面板已隐藏时用这个占位）══ */}
+      {running && !result && (
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          justifyContent: 'center', minHeight: 320, gap: 24,
+        }}>
+          <div style={{ position: 'relative', width: 72, height: 72 }}>
+            <svg viewBox="0 0 72 72" style={{ width: 72, height: 72, transform: 'rotate(-90deg)' }}>
+              <circle cx="36" cy="36" r="30" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="6" />
+              <circle cx="36" cy="36" r="30" fill="none"
+                stroke="url(#pg)" strokeWidth="6" strokeLinecap="round"
+                strokeDasharray={`${2 * Math.PI * 30}`}
+                strokeDashoffset={`${2 * Math.PI * 30 * (1 - progress / 100)}`}
+                style={{ transition: 'stroke-dashoffset 0.6s ease' }}
+              />
+              <defs>
+                <linearGradient id="pg" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor="var(--blue)" />
+                  <stop offset="100%" stopColor="var(--green)" />
+                </linearGradient>
+              </defs>
+            </svg>
+            <div style={{
+              position: 'absolute', inset: 0, display: 'flex',
+              alignItems: 'center', justifyContent: 'center',
+              fontSize: 14, fontWeight: 700, color: 'var(--text)',
+            }}>{progress}%</div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>回测运行中...</div>
+            <div style={{ fontSize: 12, color: 'var(--muted)' }}>正在遍历历史K线，请稍候</div>
           </div>
         </div>
       )}
