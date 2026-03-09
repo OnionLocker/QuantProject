@@ -147,6 +147,20 @@ def _resolve_config(user_id: int) -> dict:
 
     user_cfg = load_user_config(user_id)
 
+    # 风控参数：用户 DB 配置优先，fallback 全局 config.yaml
+    max_consecutive_losses = (
+        user_cfg.get("max_consecutive_losses")
+        or rc.get("max_consecutive_losses", 3)
+    )
+    daily_loss_limit_pct = (
+        user_cfg.get("daily_loss_limit_pct")
+        or rc.get("daily_loss_limit_pct", 0.05)
+    )
+    max_trade_amount = (
+        user_cfg.get("max_trade_amount")
+        or rc.get("max_trade_amount", 1000)
+    )
+
     return {
         "symbol":          user_cfg.get("symbol")        or bc.get("symbol",           "BTC/USDT:USDT"),
         "timeframe":       user_cfg.get("timeframe")     or bc.get("timeframe",         "1h"),
@@ -157,9 +171,9 @@ def _resolve_config(user_id: int) -> dict:
         "contract_size":   bc.get("contract_size",    0.01),
         "taker_fee_rate":  bc.get("taker_fee_rate",   0.0005),
         "check_interval":  bc.get("check_interval",   300),
-        "max_trade_amount":       rc.get("max_trade_amount",       1000),
-        "max_consecutive_losses": rc.get("max_consecutive_losses", 3),
-        "daily_loss_limit_pct":   rc.get("daily_loss_limit_pct",   0.05),
+        "max_trade_amount":       max_trade_amount,
+        "max_consecutive_losses": max_consecutive_losses,
+        "daily_loss_limit_pct":   daily_loss_limit_pct,
     }
 
 
