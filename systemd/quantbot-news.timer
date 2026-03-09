@@ -1,0 +1,15 @@
+[Unit]
+Description=QuantProject News Fetcher Timer
+Requires=quantbot-news.service
+
+[Timer]
+# 每 30 分钟执行一次
+OnBootSec=2min
+OnUnitActiveSec=30min
+# 系统启动后若错过了，补跑一次
+Persistent=true
+# 随机延迟最多 60 秒，避免多服务同时占用网络
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

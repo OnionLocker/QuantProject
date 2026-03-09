@@ -1,0 +1,14 @@
+[Unit]
+Description=QuantProject News Fetcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/QuantProject
+ExecStart=/usr/bin/python3 /root/QuantProject/scripts/fetch_news.py
+StandardOutput=append:/root/QuantProject/logs/news_fetcher.log
+StandardError=append:/root/QuantProject/logs/news_fetcher.log
+# 超时 60 秒（网络不稳定时不卡死）
+TimeoutSec=60

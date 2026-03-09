@@ -112,6 +112,19 @@ if [ -f "$SERVICE_FILE" ] && command -v systemctl &>/dev/null; then
     systemctl start quantbot-backup.timer
     echo "✅ 数据库备份定时器已安装（每天 00:05 执行）"
   fi
+
+  # 安装新闻抓取定时器
+  NEWS_SERVICE="$PROJECT_DIR/systemd/quantbot-news.service"
+  NEWS_TIMER="$PROJECT_DIR/systemd/quantbot-news.timer"
+  if [ -f "$NEWS_SERVICE" ] && [ -f "$NEWS_TIMER" ]; then
+    sed "s|/root/QuantProject|$PROJECT_DIR|g" "$NEWS_SERVICE" > /etc/systemd/system/quantbot-news.service
+    sed -i "s|/usr/bin/python3|$(which $PYTHON)|g" /etc/systemd/system/quantbot-news.service
+    cp "$NEWS_TIMER" /etc/systemd/system/quantbot-news.timer
+    systemctl daemon-reload
+    systemctl enable quantbot-news.timer
+    systemctl start quantbot-news.timer
+    echo "✅ 新闻抓取定时器已安装（每 30 分钟执行）"
+  fi
 else
   # 降级到 nohup
   echo "⚠️  未检测到 systemd，使用 nohup 启动..."
@@ -139,6 +152,8 @@ if systemctl is-active --quiet quantbot 2>/dev/null || pgrep -f "uvicorn api.ser
   echo "   🔄 重启：systemctl restart quantbot"
   echo "   💾 备份：python3 scripts/backup_db.py"
   echo "          备份文件位置：backups/"
+  echo "   📰 新闻状态：python3 scripts/fetch_news.py --status"
+  echo "   📰 强制抓新闻：python3 scripts/fetch_news.py --force"
   echo "========================================"
 else
   echo ""
