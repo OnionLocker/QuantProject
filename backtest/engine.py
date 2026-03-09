@@ -136,6 +136,8 @@ def run_backtest(
     balance         = initial_capital
     position_amount = 0
     position_side   = None
+    trades          = []          # 详细交易列表，用于前端 K 线图标注
+    _open_trade_idx = None        # 当前持仓的开仓 K 线 index（用于关联平仓）
     entry_price     = 0.0
     open_fee_paid   = 0.0
     active_sl       = 0.0
@@ -262,6 +264,23 @@ def run_backtest(
             active_tp       = signal["tp1"]
             position_side   = "long" if action == "BUY" else "short"
             total_trades   += 1
+            _open_trade_idx = i
+
+            # 记录开仓信息（后续平仓时补全）
+            trades.append({
+                "entry_ts":    str(ts),
+                "entry_price": round(actual_entry, 4),
+                "side":        position_side,
+                "sl":          round(active_sl, 4),
+                "tp":          round(active_tp, 4),
+                "contracts":   contracts,
+                # 平仓后补全：
+                "exit_ts":     None,
+                "exit_price":  None,
+                "exit_reason": None,
+                "pnl":         None,
+                "result":      None,
+            })
 
             if not silent:
                 emoji = "🟢" if action == "BUY" else "🔴"
@@ -312,6 +331,15 @@ def run_backtest(
                         tqdm.write(f"[{ts}] 🚨 回测熔断触发（第{fuse_triggered_count}次），跳过后续开仓直至手动恢复")
                     # 回测中自动恢复熔断（模拟日内结束后恢复）
                     bt_rm.manual_resume()
+
+                # 补全多单交易记录
+                if trades and trades[-1]["exit_ts"] is None:
+                    t = trades[-1]
+                    t["exit_ts"]    = str(ts)
+                    t["exit_price"] = round(close_price, 4)
+                    t["exit_reason"]= close_reason
+                    t["pnl"]        = round(net_pnl, 2)
+                    t["result"]     = "win" if net_pnl > 0 else "loss"
 
                 equity_curve.append({
                     "date":    str(ts)[:10],
@@ -372,6 +400,15 @@ def run_backtest(
                         tqdm.write(f"[{ts}] 🚨 回测熔断触发（第{fuse_triggered_count}次），跳过后续开仓直至手动恢复")
                     bt_rm.manual_resume()
 
+                # 补全空单交易记录
+                if trades and trades[-1]["exit_ts"] is None:
+                    t = trades[-1]
+                    t["exit_ts"]    = str(ts)
+                    t["exit_price"] = round(close_price, 4)
+                    t["exit_reason"]= close_reason
+                    t["pnl"]        = round(net_pnl, 2)
+                    t["result"]     = "win" if net_pnl > 0 else "loss"
+
                 equity_curve.append({
                     "date":    str(ts)[:10],
                     "balance": round(balance, 2),
@@ -394,6 +431,22 @@ def run_backtest(
     if len(equity_curve) > 200:
         step = len(equity_curve) // 200
         equity_curve = equity_curve[::step]
+
+    # ── 构建 K 线数据供前端图表使用 ──────────────────────────────────────────
+    # 仅保留回测区间内的 K 线，并精简到最多 2000 根（避免响应体过大）
+    candles_raw = []
+    for idx_ts, row in df.iterrows():
+        candles_raw.append({
+            "time":  int(pd.Timestamp(idx_ts).timestamp()),
+            "open":  round(float(row["open"]),  4),
+            "high":  round(float(row["high"]),  4),
+            "low":   round(float(row["low"]),   4),
+            "close": round(float(row["close"]), 4),
+        })
+    MAX_CANDLES = 2000
+    if len(candles_raw) > MAX_CANDLES:
+        step = len(candles_raw) // MAX_CANDLES
+        candles_raw = candles_raw[::step]
 
     # 修复：回测完成后推送 100% 进度
     if progress_cb:
@@ -428,6 +481,9 @@ def run_backtest(
         "equity_curve":          equity_curve,
         "candle_count":          len(df),
         "fuse_triggered_count":  fuse_triggered_count,
+        # K 线 + 交易列表（供前端 K 线图标注）
+        "candles":               candles_raw,
+        "trades":                trades,
         # 执行参数快照（便于结果区展示）
         "leverage":              LEVERAGE,
         "risk_pct":              RISK_PCT,

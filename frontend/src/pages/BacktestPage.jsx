@@ -5,6 +5,8 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts'
 import { Play, RotateCcw, TrendingUp, TrendingDown, Percent, BarChart2, Award, AlertTriangle } from 'lucide-react'
+import BacktestChart from '../components/BacktestChart'
+import TradeList from '../components/TradeList'
 
 const SYMBOLS    = ["BTC/USDT","ETH/USDT","SOL/USDT","BNB/USDT","XRP/USDT","DOGE/USDT","ADA/USDT","AVAX/USDT"]
 const TIMEFRAMES = ["15m","1h","4h","1d"]
@@ -386,6 +388,24 @@ export default function BacktestPage() {
             </div>
           )}
 
+          {/* ── K 线图 ── */}
+          {result.candles?.length > 0 && (
+            <div className="card mt-16 mb-16">
+              <div className="card-header" style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+                <span>K 线图 · 入场/平仓标注</span>
+                <span style={{ fontSize:11, color:'var(--muted)' }}>
+                  {result.symbol} {result.timeframe} · {result.candles.length} 根K线 · {result.trades?.length ?? 0} 笔交易
+                </span>
+              </div>
+              <BacktestChart candles={result.candles} trades={result.trades ?? []} />
+            </div>
+          )}
+
+          {/* ── 交易明细 ── */}
+          {result.trades?.length > 0 && (
+            <TradeList trades={result.trades} />
+          )}
+
           {/* 备注 */}
           {result.note && (
             <div className="alert alert-info mt-12">{result.note}</div>
@@ -418,7 +438,6 @@ export default function BacktestPage() {
       <HistoryPanel
         onLoad={(r) => {
           setResult(r)
-          setFormDirty(false)
           window.scrollTo({ top: 0, behavior: 'smooth' })
         }}
       />
