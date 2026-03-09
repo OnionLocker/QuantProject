@@ -7,6 +7,21 @@ import {
 import { Play, RotateCcw, TrendingUp, TrendingDown, Percent, BarChart2, Award, AlertTriangle } from 'lucide-react'
 import BacktestChart from '../components/BacktestChart'
 import TradeList from '../components/TradeList'
+import { Component } from 'react'
+
+// 防止图表组件 crash 导致整页白屏
+class ChartBoundary extends Component {
+  constructor(props) { super(props); this.state = { hasError: false, err: '' } }
+  static getDerivedStateFromError(e) { return { hasError: true, err: String(e) } }
+  render() {
+    if (this.state.hasError) return (
+      <div style={{ padding:16, color:'var(--muted)', fontSize:12, textAlign:'center' }}>
+        K 线图渲染失败：{this.state.err}
+      </div>
+    )
+    return this.props.children
+  }
+}
 
 const SYMBOLS    = ["BTC/USDT","ETH/USDT","SOL/USDT","BNB/USDT","XRP/USDT","DOGE/USDT","ADA/USDT","AVAX/USDT"]
 const TIMEFRAMES = ["15m","1h","4h","1d"]
@@ -432,7 +447,9 @@ export default function BacktestPage() {
                   {result.symbol} {result.timeframe} · {result.candles.length} 根K线 · {result.trades?.length ?? 0} 笔交易
                 </span>
               </div>
-              <BacktestChart candles={result.candles} trades={result.trades ?? []} />
+              <ChartBoundary>
+                <BacktestChart candles={result.candles} trades={result.trades ?? []} />
+              </ChartBoundary>
             </div>
           )}
 
