@@ -11,13 +11,15 @@ from strategy.adaptive import AdaptiveStrategy
 from strategy.trend_bull import TrendBullStrategy
 from strategy.trend_bear import TrendBearStrategy
 from strategy.range_oscillator import RangeOscillatorStrategy
+from strategy.big_candle import BigCandleStrategy
 
 _REGISTRY: dict[str, type[BaseStrategy]] = {
-    "PA_5S":    PriceActionSetups,
-    "ADAPTIVE": AdaptiveStrategy,
-    "BULL":     TrendBullStrategy,
-    "BEAR":     TrendBearStrategy,
-    "RANGE":    RangeOscillatorStrategy,
+    "PA_5S":      PriceActionSetups,
+    "ADAPTIVE":   AdaptiveStrategy,
+    "BULL":       TrendBullStrategy,
+    "BEAR":       TrendBearStrategy,
+    "RANGE":      RangeOscillatorStrategy,
+    "BIG_CANDLE": BigCandleStrategy,
 }
 
 
