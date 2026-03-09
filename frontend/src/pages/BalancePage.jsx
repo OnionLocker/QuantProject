@@ -72,6 +72,11 @@ export default function BalancePage() {
         <div className="card-header" style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
           <span style={{ display:'flex', alignItems:'center', gap:6 }}>
             <DollarSign size={12} /> OKX 实时余额
+            {live?.account_type && (
+              <span style={{ fontSize:10, padding:'1px 6px', borderRadius:4, background:'rgba(255,255,255,0.08)', color:'var(--muted)' }}>
+                {live.account_type === 'swap' ? '合约账户' : '现货账户'}
+              </span>
+            )}
           </span>
           <button
             className="btn-ghost btn-sm"

@@ -137,15 +137,36 @@ def validate_key(user=Depends(get_current_user)):
 
 @router.get("/live-balance", summary="从 OKX 实时拉取账户余额")
 def live_balance(user=Depends(get_current_user)):
-    """直接调用 OKX 接口获取最新 USDT 余额，不依赖数据库历史记录。"""
+    """直接调用 OKX 接口获取最新 USDT 余额，不依赖数据库历史记录。
+    优先读合约账户（swap），fallback 现货账户。
+    """
     ex = get_user_exchange(user["id"])
     try:
-        bal = ex.fetch_balance()
+        # OKX 合约账户余额（永续合约用这个）
+        bal = ex.fetch_balance({"type": "swap"})
         usdt = bal.get("USDT", {})
+        total = usdt.get("total") or 0
+        free  = usdt.get("free")  or 0
+        used  = usdt.get("used")  or 0
+
+        # 合约账户余额为0时，尝试现货账户（可能用户只充值了现货）
+        if total == 0:
+            bal_spot = ex.fetch_balance({"type": "spot"})
+            usdt_spot = bal_spot.get("USDT", {})
+            spot_total = usdt_spot.get("total") or 0
+            if spot_total > 0:
+                return {
+                    "total":        round(float(spot_total), 4),
+                    "free":         round(float(usdt_spot.get("free") or 0), 4),
+                    "used":         round(float(usdt_spot.get("used") or 0), 4),
+                    "account_type": "spot",
+                }
+
         return {
-            "total": usdt.get("total", 0),
-            "free":  usdt.get("free",  0),
-            "used":  usdt.get("used",  0),
+            "total":        round(float(total), 4),
+            "free":         round(float(free),  4),
+            "used":         round(float(used),  4),
+            "account_type": "swap",
         }
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"获取余额失败：{e}")
