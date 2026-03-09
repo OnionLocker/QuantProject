@@ -67,6 +67,7 @@ export default function BacktestPage() {
   })
 
   const [running,  setRunning]  = useState(false)
+  const [hlIdx,    setHlIdx]    = useState(null)   // 高亮的交易行 index
   const [progress, setProgress] = useState(0)
   const [result,   setResult]   = useState(null)
   const [errMsg,   setErrMsg]   = useState('')
@@ -127,7 +128,7 @@ export default function BacktestPage() {
     }
   }
 
-  const reset = () => { setResult(null); setErrMsg('') }
+  const reset = () => { setResult(null); setErrMsg(''); setHlIdx(null) }
 
   // 图表数据
   const eqData = result?.equity_curve?.map(p => ({
@@ -448,14 +449,14 @@ export default function BacktestPage() {
                 </span>
               </div>
               <ChartBoundary>
-                <BacktestChart candles={result.candles} trades={result.trades ?? []} />
+                <BacktestChart candles={result.candles} trades={result.trades ?? []} highlightIdx={hlIdx} />
               </ChartBoundary>
             </div>
           )}
 
           {/* ── 交易明细 ── */}
           {result.trades?.length > 0 && (
-            <TradeList trades={result.trades} />
+            <TradeList trades={result.trades} highlightIdx={hlIdx} onHighlight={setHlIdx} />
           )}
 
           {/* 备注 */}

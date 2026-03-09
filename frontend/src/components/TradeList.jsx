@@ -1,10 +1,8 @@
 /**
- * TradeList.jsx
- * 回测交易明细列表
+ * TradeList.jsx — 交易明细表，点击行高亮 K 线图 SL/TP
  */
-export default function TradeList({ trades = [] }) {
+export default function TradeList({ trades = [], highlightIdx, onHighlight }) {
   if (!trades.length) return null
-
   const completed = trades.filter(t => t.exit_ts)
 
   return (
@@ -13,7 +11,9 @@ export default function TradeList({ trades = [] }) {
         <span>交易明细</span>
         <span style={{ fontSize:11, color:'var(--muted)', fontWeight:400 }}>
           共 {completed.length} 笔已平仓
-          {trades.length > completed.length && `（${trades.length - completed.length} 笔未平仓）`}
+          {trades.length > completed.length && `（${trades.length - completed.length} 笔持仓中）`}
+          &nbsp;·&nbsp;
+          <span style={{ color:'var(--muted)', fontSize:10 }}>点击行可在 K 线图高亮 SL/TP</span>
         </span>
       </div>
 
@@ -23,7 +23,8 @@ export default function TradeList({ trades = [] }) {
             <tr style={{ borderBottom:'1px solid rgba(255,255,255,0.08)' }}>
               {['#','方向','开仓时间','开仓价','SL','TP','平仓时间','平仓价','原因','PnL'].map(h => (
                 <th key={h} style={{
-                  padding:'8px 10px', textAlign: h === 'PnL' ? 'right' : 'left',
+                  padding:'8px 10px',
+                  textAlign: h === 'PnL' ? 'right' : 'left',
                   color:'var(--muted)', fontWeight:500, whiteSpace:'nowrap',
                 }}>{h}</th>
               ))}
@@ -31,14 +32,21 @@ export default function TradeList({ trades = [] }) {
           </thead>
           <tbody>
             {trades.map((t, i) => {
-              const isWin  = t.result === 'win'
-              const isLong = t.side === 'long'
-              const pnlColor = t.pnl == null ? 'var(--muted)'
-                             : t.pnl >= 0    ? 'var(--green)' : 'var(--red)'
+              const isLong   = t.side === 'long'
+              const isActive = highlightIdx === i
+              const pnlColor = t.pnl == null   ? 'var(--muted)'
+                             : t.pnl >= 0      ? 'var(--green)' : 'var(--red)'
               return (
-                <tr key={i} style={{
-                  borderBottom: i < trades.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
-                }}>
+                <tr
+                  key={i}
+                  onClick={() => onHighlight?.(isActive ? null : i)}
+                  style={{
+                    borderBottom: i < trades.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
+                    background:   isActive ? 'rgba(255,255,255,0.05)' : 'transparent',
+                    cursor:       'pointer',
+                    transition:   'background 0.15s',
+                  }}
+                >
                   <td style={{ padding:'7px 10px', color:'var(--muted)' }}>{i + 1}</td>
                   <td style={{ padding:'7px 10px' }}>
                     <span style={{
