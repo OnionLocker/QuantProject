@@ -20,13 +20,19 @@ const CustomTooltip = ({ active, payload, label }) => {
 
 export default function BalancePage() {
   const [data, setData]             = useState([])
+  const [dataLoading, setDataLoading] = useState(true)
+  const [dataErr, setDataErr]       = useState('')
   const [live, setLive]             = useState(null)      // { total, free, used }
   const [liveLoading, setLiveLoading] = useState(false)
   const [liveErr, setLiveErr]       = useState('')
 
   // 历史数据
   useEffect(() => {
-    dataApi.balance(90).then(r => setData(r.data.reverse()))
+    setDataLoading(true)
+    dataApi.balance(90)
+      .then(r => setData(r.data.reverse()))
+      .catch(err => setDataErr(err.response?.data?.detail || '历史数据加载失败'))
+      .finally(() => setDataLoading(false))
   }, [])
 
   // 实时余额
@@ -66,6 +72,27 @@ export default function BalancePage() {
           <div className="page-sub">近 90 日账户余额走势</div>
         </div>
       </div>
+
+      {/* ── 历史数据加载中骨架屏 ── */}
+      {dataLoading && (
+        <div className="page-skeleton">
+          <div className="skeleton skeleton-chart" style={{ marginBottom: 16 }} />
+          <div className="skeleton-row">
+            {[1,2,3,4].map(i => <div key={i} className="skeleton skeleton-cell" />)}
+          </div>
+        </div>
+      )}
+
+      {/* ── 历史数据加载错误 ── */}
+      {dataErr && (
+        <div className="alert alert-danger mb-16">
+          {dataErr}
+          <button className="btn-ghost btn-sm" style={{ marginLeft: 12 }}
+            onClick={() => { setDataErr(''); setDataLoading(true); dataApi.balance(90).then(r => setData(r.data.reverse())).catch(e => setDataErr(e.response?.data?.detail || '加载失败')).finally(() => setDataLoading(false)) }}>
+            重试
+          </button>
+        </div>
+      )}
 
       {/* ── 实时余额卡片 ── */}
       <div className="card mb-20">

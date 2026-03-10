@@ -35,6 +35,15 @@ _PROJECT_ROOT = os.path.dirname(_DIR)
 _DB_PATH     = os.path.join(_PROJECT_ROOT, "trading_data.db")
 
 
+def _get_news_conn() -> sqlite3.Connection:
+    """获取新闻模块专用的 SQLite 连接（WAL模式 + busy timeout）。
+    独立于 db_handler 的连接池，避免循环导入。"""
+    conn = sqlite3.connect(_DB_PATH, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
 # ── DB：创建 news_cache 表 ────────────────────────────────────────────────────
 
 def _ensure_table():
@@ -197,26 +206,30 @@ def _keyword_score(text: str, cfg: dict) -> float:
 
 # ── AI 情绪分析（可选，hybrid模式超阈值时调用）────────────────────────────────
 
-def _ai_sentiment_analysis(headlines: list[str]) -> float:
+def _ai_sentiment_analysis(headlines: list[str], sentiment_cfg: dict = None) -> float:
     """
     调用 AI 对一批新闻标题进行情绪分析，返回 [-1.0, 1.0] 的综合情绪分数。
-    失败时返回 0.0（中性）。
+    失败时降级到关键词评分方法。
 
     此函数设计为可被 OpenClaw 的 AI 能力调用，
     也可以接入任何 OpenAI 兼容接口。
     """
     try:
         # 尝试导入项目内可能配置的 AI 客户端
-        # 如果没有，降级到关键词方法
         try:
             from utils.ai_client import analyze_sentiment
             return analyze_sentiment(headlines)
         except ImportError:
             pass
 
-        # 降级：使用更细致的关键词规则
-        # （真实的AI调用由OpenClaw的cron任务负责，结果直接写入DB）
-        logger.info("AI客户端未配置，使用关键词降级分析")
+        # 降级：使用关键词分析（将所有标题聚合评分）
+        if sentiment_cfg and headlines:
+            total_score = 0.0
+            for h in headlines:
+                total_score += _keyword_score(h, sentiment_cfg)
+            return _normalize(total_score / len(headlines))
+
+        logger.info("AI客户端未配置且无关键词配置，返回中性情绪")
         return 0.0
 
     except Exception as e:
@@ -331,7 +344,7 @@ def fetch_and_analyze(force: bool = False) -> dict:
         # AI深度分析（hybrid/ai模式）
         ai_score = 0.0
         if ai_candidates and mode in ("ai", "hybrid"):
-            ai_raw = _ai_sentiment_analysis(ai_candidates)
+            ai_raw = _ai_sentiment_analysis(ai_candidates, sentiment_cfg)
             ai_score = ai_raw
             source_scores.append(ai_score * 3.0)  # AI分析权重加倍
 

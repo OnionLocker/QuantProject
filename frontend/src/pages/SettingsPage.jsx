@@ -16,6 +16,7 @@ function Section({ icon: Icon, title, children }) {
 export default function SettingsPage() {
   // Bot 运行状态
   const [botRunning, setBotRunning] = useState(false)
+  const [initialLoading, setInitialLoading] = useState(true)
 
   // OKX Key
   const [keyStatus, setKeyStatus]   = useState(null)
@@ -37,17 +38,19 @@ export default function SettingsPage() {
   const [testing, setTesting]       = useState(false)
 
   useEffect(() => {
-    keysApi.status().then(r => {
-      setKeyStatus(r.data)
-      setShowKeyForm(!r.data.configured)
-    })
-    notifyApi.tgStatus().then(r => {
-      setTgStatus(r.data)
-      setShowTgForm(!r.data.configured)
-    })
-    botApi.status().then(r => {
-      setBotRunning(r.data?.bot?.running === true)
-    }).catch(() => {})
+    Promise.allSettled([
+      keysApi.status().then(r => {
+        setKeyStatus(r.data)
+        setShowKeyForm(!r.data.configured)
+      }),
+      notifyApi.tgStatus().then(r => {
+        setTgStatus(r.data)
+        setShowTgForm(!r.data.configured)
+      }),
+      botApi.status().then(r => {
+        setBotRunning(r.data?.bot?.running === true)
+      }),
+    ]).finally(() => setInitialLoading(false))
   }, [])
 
   // ── OKX 保存 ──────────────────────────────────────────────────────────────
@@ -139,6 +142,21 @@ export default function SettingsPage() {
           <div className="page-sub">API Key 与通知配置</div>
         </div>
       </div>
+
+      {/* 初始加载骨架屏 */}
+      {initialLoading ? (
+        <div className="page-skeleton">
+          {[1,2,3].map(i => (
+            <div key={i} className="card mb-16">
+              <div className="skeleton skeleton-title" />
+              <div className="skeleton skeleton-text" style={{ width: '80%' }} />
+              <div className="skeleton skeleton-text" style={{ width: '60%' }} />
+              <div className="skeleton skeleton-text" style={{ width: '40%', marginTop: 12 }} />
+            </div>
+          ))}
+        </div>
+      ) : (
+      <>
 
       {/* ── OKX API Key ── */}
       <Section icon={KeyRound} title="OKX API Key">
@@ -335,6 +353,9 @@ export default function SettingsPage() {
 
       {/* ── 风控参数 ── */}
       <RiskSection botRunning={botRunning} />
+
+      </>
+      )}
     </div>
   )
 }

@@ -56,6 +56,57 @@ SUPPORTED_SYMBOLS = [
 SUPPORTED_TIMEFRAMES = ["15m", "1h", "4h", "1d"]
 
 
+# ── 回测平仓逻辑统一抽取（多单/空单复用）──────────────────────────────────────
+def _close_position(
+    close_price, close_reason, position_side, position_amount,
+    entry_price, open_fee_paid, gross, balance, total_fees_paid,
+    CONTRACT_SIZE, FEE_RATE, bt_rm, fuse_triggered_count,
+    trades, equity_curve, ts, silent,
+):
+    """
+    统一执行平仓结算逻辑，返回更新后的:
+    (balance, total_fees_paid, position_amount, position_side, fuse_triggered_count)
+    """
+    notional      = position_amount * CONTRACT_SIZE * close_price
+    close_fee     = notional * FEE_RATE
+    balance      -= close_fee
+    total_fees_paid += close_fee
+    balance      += gross
+    net_pnl       = gross - (open_fee_paid + close_fee)
+
+    # 回测内熔断模拟
+    bt_rm.notify_trade_result(net_pnl, balance)
+    if bt_rm.is_fused:
+        fuse_triggered_count += 1
+        if not silent:
+            tqdm.write(f"[{ts}] 🚨 回测熔断触发（第{fuse_triggered_count}次），跳过后续开仓直至手动恢复")
+        bt_rm.manual_resume()
+
+    # 补全交易记录
+    if trades and trades[-1]["exit_ts"] is None:
+        t = trades[-1]
+        t["exit_ts"]     = str(ts)
+        t["exit_price"]  = round(close_price, 4)
+        t["exit_reason"] = close_reason
+        t["pnl"]         = round(net_pnl, 2)
+        t["result"]      = "win" if net_pnl > 0 else "loss"
+
+    equity_curve.append({
+        "date":    str(ts)[:10],
+        "balance": round(balance, 2),
+        "pnl":     round(net_pnl, 2),
+        "result":  "win" if net_pnl > 0 else "loss",
+    })
+
+    if not silent:
+        side_label = "多" if position_side == "long" else "空"
+        emoji = "🎉" if net_pnl > 0 else "🩸"
+        tqdm.write(f"[{ts}] {emoji} 平{side_label} {close_reason} "
+                   f"@{close_price:.2f} 净盈亏:{net_pnl:+.2f}U 余额:{balance:.2f}U")
+
+    return (balance, total_fees_paid, 0, None, fuse_triggered_count)
+
+
 # ── 自适应滑点：根据 ATR 占价格比例动态调整 ───────────────────────────────────
 def _adaptive_slippage(atr: float, price: float,
                        base: float = 0.0002,
@@ -324,8 +375,6 @@ def run_backtest(
             tp_hit = c_high >= active_tp
 
             if sl_hit and tp_hit:
-                # 同一根K线同时触碰SL和TP：按谁离入场价更近来判断先触发
-                # 多单：SL在下方，TP在上方；谁距入场价更近谁先触发
                 dist_sl = entry_price - active_sl
                 dist_tp = active_tp  - entry_price
                 if dist_tp <= dist_sl:
@@ -341,49 +390,22 @@ def run_backtest(
                 close_price, close_reason = active_tp * (1 + _close_slip), "止盈"
                 winning_trades += 1
             elif action == "SELL":
-                close_price, close_reason = c_close, "反转平多"
+                # 反转平多：卖出方向，滑点向下
+                close_price = c_close * (1 - _close_slip)
+                close_reason = "反转平多"
 
             if close_price > 0:
-                notional      = position_amount * CONTRACT_SIZE * close_price
-                close_fee     = notional * FEE_RATE
-                balance      -= close_fee
-                total_fees_paid += close_fee
-                gross         = (close_price - entry_price) * position_amount * CONTRACT_SIZE
-                balance      += gross
-                net_pnl       = gross - (open_fee_paid + close_fee)
-
-                # ── 回测内熔断模拟：通知风控，触发时记录并跳过后续开仓 ──────
-                bt_rm.notify_trade_result(net_pnl, balance)
-                if bt_rm.is_fused:
-                    fuse_triggered_count += 1
-                    if not silent:
-                        tqdm.write(f"[{ts}] 🚨 回测熔断触发（第{fuse_triggered_count}次），跳过后续开仓直至手动恢复")
-                    # 回测中自动恢复熔断（模拟日内结束后恢复）
-                    bt_rm.manual_resume()
-
-                # 补全多单交易记录
-                if trades and trades[-1]["exit_ts"] is None:
-                    t = trades[-1]
-                    t["exit_ts"]    = str(ts)
-                    t["exit_price"] = round(close_price, 4)
-                    t["exit_reason"]= close_reason
-                    t["pnl"]        = round(net_pnl, 2)
-                    t["result"]     = "win" if net_pnl > 0 else "loss"
-
-                equity_curve.append({
-                    "date":    str(ts)[:10],
-                    "balance": round(balance, 2),
-                    "pnl":     round(net_pnl, 2),
-                    "result":  "win" if net_pnl > 0 else "loss",
-                })
-
-                if not silent:
-                    emoji = "🎉" if net_pnl > 0 else "🩸"
-                    tqdm.write(f"[{ts}] {emoji} 平多 {close_reason} "
-                               f"@{close_price:.2f} 净盈亏:{net_pnl:+.2f}U 余额:{balance:.2f}U")
-
-                position_amount = 0
-                position_side   = None
+                gross = (close_price - entry_price) * position_amount * CONTRACT_SIZE
+                (balance, total_fees_paid, position_amount, position_side,
+                 fuse_triggered_count) = _close_position(
+                    close_price=close_price, close_reason=close_reason,
+                    position_side="long", position_amount=position_amount,
+                    entry_price=entry_price, open_fee_paid=open_fee_paid,
+                    gross=gross, balance=balance, total_fees_paid=total_fees_paid,
+                    CONTRACT_SIZE=CONTRACT_SIZE, FEE_RATE=FEE_RATE,
+                    bt_rm=bt_rm, fuse_triggered_count=fuse_triggered_count,
+                    trades=trades, equity_curve=equity_curve, ts=ts, silent=silent,
+                )
 
         # ── 空单平仓检测 ─────────────────────────────────────────────────────
         elif position_amount > 0 and position_side == "short":
@@ -395,8 +417,6 @@ def run_backtest(
             tp_hit = c_low  <= active_tp
 
             if sl_hit and tp_hit:
-                # 同一根K线同时触碰SL和TP：按谁离入场价更近来判断先触发
-                # 空单：SL在上方，TP在下方；谁距入场价更近谁先触发
                 dist_sl = active_sl  - entry_price
                 dist_tp = entry_price - active_tp
                 if dist_tp <= dist_sl:
@@ -412,48 +432,22 @@ def run_backtest(
                 close_price, close_reason = active_tp * (1 - _close_slip), "止盈"
                 winning_trades += 1
             elif action == "BUY":
-                close_price, close_reason = c_close, "反转平空"
+                # 反转平空：买入方向，滑点向上
+                close_price = c_close * (1 + _close_slip)
+                close_reason = "反转平空"
 
             if close_price > 0:
-                notional      = position_amount * CONTRACT_SIZE * close_price
-                close_fee     = notional * FEE_RATE
-                balance      -= close_fee
-                total_fees_paid += close_fee
-                gross         = (entry_price - close_price) * position_amount * CONTRACT_SIZE
-                balance      += gross
-                net_pnl       = gross - (open_fee_paid + close_fee)
-
-                # ── 回测内熔断模拟：通知风控，触发时记录并跳过后续开仓 ──────
-                bt_rm.notify_trade_result(net_pnl, balance)
-                if bt_rm.is_fused:
-                    fuse_triggered_count += 1
-                    if not silent:
-                        tqdm.write(f"[{ts}] 🚨 回测熔断触发（第{fuse_triggered_count}次），跳过后续开仓直至手动恢复")
-                    bt_rm.manual_resume()
-
-                # 补全空单交易记录
-                if trades and trades[-1]["exit_ts"] is None:
-                    t = trades[-1]
-                    t["exit_ts"]    = str(ts)
-                    t["exit_price"] = round(close_price, 4)
-                    t["exit_reason"]= close_reason
-                    t["pnl"]        = round(net_pnl, 2)
-                    t["result"]     = "win" if net_pnl > 0 else "loss"
-
-                equity_curve.append({
-                    "date":    str(ts)[:10],
-                    "balance": round(balance, 2),
-                    "pnl":     round(net_pnl, 2),
-                    "result":  "win" if net_pnl > 0 else "loss",
-                })
-
-                if not silent:
-                    emoji = "🎉" if net_pnl > 0 else "🩸"
-                    tqdm.write(f"[{ts}] {emoji} 平空 {close_reason} "
-                               f"@{close_price:.2f} 净盈亏:{net_pnl:+.2f}U 余额:{balance:.2f}U")
-
-                position_amount = 0
-                position_side   = None
+                gross = (entry_price - close_price) * position_amount * CONTRACT_SIZE
+                (balance, total_fees_paid, position_amount, position_side,
+                 fuse_triggered_count) = _close_position(
+                    close_price=close_price, close_reason=close_reason,
+                    position_side="short", position_amount=position_amount,
+                    entry_price=entry_price, open_fee_paid=open_fee_paid,
+                    gross=gross, balance=balance, total_fees_paid=total_fees_paid,
+                    CONTRACT_SIZE=CONTRACT_SIZE, FEE_RATE=FEE_RATE,
+                    bt_rm=bt_rm, fuse_triggered_count=fuse_triggered_count,
+                    trades=trades, equity_curve=equity_curve, ts=ts, silent=silent,
+                )
 
     win_rate = winning_trades / total_trades * 100 if total_trades > 0 else 0.0
     roi      = (balance - initial_capital) / initial_capital * 100
@@ -529,8 +523,20 @@ def run_backtest(
         })
     MAX_CANDLES = 2000
     if len(candles_raw) > MAX_CANDLES:
+        # 优先保留有交易标注的 K 线，避免降采样丢失开平仓关键点
+        trade_times = set()
+        for t in trades:
+            if t.get("entry_ts"):
+                trade_times.add(int(pd.Timestamp(t["entry_ts"]).timestamp()))
+            if t.get("exit_ts"):
+                trade_times.add(int(pd.Timestamp(t["exit_ts"]).timestamp()))
+
         step = len(candles_raw) // MAX_CANDLES
-        candles_raw = candles_raw[::step]
+        sampled = []
+        for idx, c in enumerate(candles_raw):
+            if idx % step == 0 or c["time"] in trade_times:
+                sampled.append(c)
+        candles_raw = sampled
 
     # 修复：回测完成后推送 100% 进度
     if progress_cb:

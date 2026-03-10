@@ -11,8 +11,14 @@ from cryptography.fernet import Fernet
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
 
-# ── 密钥加载 ──────────────────────────────────────────────────────────────
+# ── 密钥加载（单例缓存，仅首次初始化）──────────────────────────────────────
+_fernet_instance: Fernet | None = None
+
+
 def _get_fernet() -> Fernet:
+    global _fernet_instance
+    if _fernet_instance is not None:
+        return _fernet_instance
     from dotenv import load_dotenv
     load_dotenv(os.path.join(project_root, ".env"))
     key = os.getenv("ENCRYPT_KEY")
@@ -20,7 +26,8 @@ def _get_fernet() -> Fernet:
         raise RuntimeError(
             "❌ 未找到 ENCRYPT_KEY。请运行 'python3.11 -m api.auth.crypto' 生成并写入 .env"
         )
-    return Fernet(key.encode())
+    _fernet_instance = Fernet(key.encode())
+    return _fernet_instance
 
 
 def encrypt(plain: str) -> str:

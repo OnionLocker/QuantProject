@@ -88,6 +88,7 @@ class MarketRegimeSelector:
 
         # 技术面 regime 评分缓存（避免每根K线都重算）
         self._last_tech_regime:      str   = REGIME_UNKNOWN
+        self._last_tech_conf:        float = 0.0
         self._last_tech_calc_time:   float = 0.0
         self._tech_cache_seconds:    int   = 60   # 最多60秒重算一次
 
@@ -240,14 +241,16 @@ class MarketRegimeSelector:
         # 技术面（带缓存，1分钟内不重算）
         now = time.time()
         if now - self._last_tech_calc_time > self._tech_cache_seconds:
-            self._last_tech_regime, tech_conf = self._calc_tech_regime(df)
+            self._last_tech_regime, self._last_tech_conf = self._calc_tech_regime(df)
             self._last_tech_calc_time = now
-        else:
-            _, tech_conf = self._calc_tech_regime(df)
         tech_regime = self._last_tech_regime
+        tech_conf   = self._last_tech_conf
 
-        # 新闻面
-        news_regime, news_conf = self._get_news_regime()
+        # 新闻面（news_weight=0 时直接跳过，避免无意义的 import 和 DB 查询）
+        if self.news_weight > 0:
+            news_regime, news_conf = self._get_news_regime()
+        else:
+            news_regime, news_conf = REGIME_UNKNOWN, 0.0
 
         # ── 加权投票 ─────────────────────────────────────────────────────────
         votes = {REGIME_BULL: 0.0, REGIME_BEAR: 0.0, REGIME_RANGING: 0.0, REGIME_BREAKOUT: 0.0}

@@ -52,3 +52,7 @@ Thumbs.db
 *.pem
 *.key
 *.crt
+gittoken.txt
+
+# ── CodeBuddy 项目数据 ───────────────────────────────────────────────────
+.codebuddy/

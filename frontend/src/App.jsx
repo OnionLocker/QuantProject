@@ -6,6 +6,7 @@ import TradesPage   from './pages/TradesPage'
 import BalancePage  from './pages/BalancePage'
 import BacktestPage from './pages/BacktestPage'
 import SettingsPage from './pages/SettingsPage'
+import ErrorBoundary from './components/ErrorBoundary'
 import {
   LayoutDashboard, ListOrdered, TrendingUp,
   FlaskConical, Settings, LogOut, ChevronRight, ChevronLeft,
@@ -115,7 +116,9 @@ export default function App() {
 
       {/* ── 主内容 ── */}
       <main className="main-content">
-        {renderPage()}
+        <ErrorBoundary key={page}>
+          {renderPage()}
+        </ErrorBoundary>
       </main>
     </div>
   )

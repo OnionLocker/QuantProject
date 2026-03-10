@@ -62,6 +62,7 @@ def get_bot(user_id: int) -> Optional[UserBotState]:
 
 
 def start_bot(user_id: int, username: str, strategy_name: str = None) -> dict:
+    _ensure_watchdog()   # 首次 start_bot 时启动 Watchdog
     state = get_or_create(user_id, username)
     if state.is_running:
         return {"status": "already_running"}
@@ -122,18 +123,28 @@ def _get_notifier_for_user(user_id: int, username: str):
     try:
         from execution.db_handler import load_tg_config
         from api.auth.crypto import decrypt
-        from utils.notifier import make_notifier, send_telegram_msg
+        from utils.notifier import make_notifier, send_telegram_msg, _GLOBAL_TOKEN, _GLOBAL_CHAT_ID
         raw = load_tg_config(user_id)
         if raw["tg_bot_token_enc"] and raw["tg_chat_id_enc"]:
             token   = decrypt(raw["tg_bot_token_enc"])
             chat_id = decrypt(raw["tg_chat_id_enc"])
-            fn = make_notifier(token, chat_id)
-            if fn:
-                return fn
-    except Exception:
-        pass
-    from utils.notifier import send_telegram_msg
-    return send_telegram_msg
+            if token and chat_id:
+                fn = make_notifier(token, chat_id)
+                if fn:
+                    return fn
+    except Exception as e:
+        bot_logger.warning(f"[Watchdog] 加载用户 {username} 的 TG 配置失败: {e}")
+
+    # 回退到全局 .env 配置
+    from utils.notifier import send_telegram_msg, _GLOBAL_TOKEN, _GLOBAL_CHAT_ID
+    if _GLOBAL_TOKEN and _GLOBAL_CHAT_ID:
+        return send_telegram_msg
+
+    # 全局也无配置，返回空操作
+    def _noop(msg: str) -> bool:
+        bot_logger.debug(f"[Watchdog][{username}] 通知跳过: {msg[:80]}...")
+        return False
+    return _noop
 
 
 def _watchdog_loop(check_interval: int = 60):
@@ -208,5 +219,17 @@ def _start_watchdog():
     return t
 
 
-# 应用启动时自动运行 Watchdog
-_watchdog_thread = _start_watchdog()
+# 延迟启动 Watchdog：首次 start_bot 时才启动，避免 import 时副作用
+_watchdog_thread = None
+_watchdog_started = False
+
+
+def _ensure_watchdog():
+    """确保 Watchdog 已启动（线程安全，只启动一次）。"""
+    global _watchdog_thread, _watchdog_started
+    if _watchdog_started:
+        return
+    with _lock:
+        if not _watchdog_started:
+            _watchdog_thread = _start_watchdog()
+            _watchdog_started = True

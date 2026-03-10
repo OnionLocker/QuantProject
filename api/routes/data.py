@@ -18,21 +18,19 @@ import threading
 
 router = APIRouter(prefix="/api/data", tags=["data"])
 
-_backtest_results: dict = {}   # user_id -> result
+_backtest_lock = threading.Lock()     # 保护下面两个共享 dict 的并发读写
+_backtest_results: dict = {}   # user_id -> result (内存缓存，运行中也写DB)
 _backtest_running: dict = {}   # user_id -> bool
 
 
 @router.get("/trades", summary="我的历史交易")
 def get_trades(limit: int = 50, user=Depends(get_current_user)):
     conn = get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT id,timestamp,symbol,side,action,price,amount,pnl,reason "
-            "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
-            (user["id"], limit)
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT id,timestamp,symbol,side,action,price,amount,pnl,reason "
+        "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        (user["id"], limit)
+    ).fetchall()
     keys = ["id", "timestamp", "symbol", "side", "action", "price", "amount", "pnl", "reason"]
     return [dict(zip(keys, r)) for r in rows]
 
@@ -40,13 +38,10 @@ def get_trades(limit: int = 50, user=Depends(get_current_user)):
 @router.get("/balance", summary="我的每日余额历史")
 def get_balance(limit: int = 90, user=Depends(get_current_user)):
     conn = get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT date, balance FROM daily_balance WHERE user_id=? ORDER BY date DESC LIMIT ?",
-            (user["id"], limit)
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT date, balance FROM daily_balance WHERE user_id=? ORDER BY date DESC LIMIT ?",
+        (user["id"], limit)
+    ).fetchall()
     return [{"date": r[0], "balance": r[1]} for r in rows]
 
 
@@ -83,11 +78,11 @@ class BacktestBody(BaseModel):
 @router.post("/backtest/run", summary="触发回测（后台异步执行）")
 def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
     uid = user["id"]
-    if _backtest_running.get(uid):
-        return {"status": "already_running"}
-
-    _backtest_running[uid] = True
-    _backtest_results[uid] = {"status": "running"}
+    with _backtest_lock:
+        if _backtest_running.get(uid):
+            return {"status": "already_running"}
+        _backtest_running[uid] = True
+        _backtest_results[uid] = {"status": "running"}
 
     def _do():
         try:
@@ -132,7 +127,8 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
 
             # 进度回调：引擎每完成 10% K线更新一次内存状态
             def _progress_cb(pct: int):
-                _backtest_results[uid] = {"status": "running", "progress_pct": pct}
+                with _backtest_lock:
+                    _backtest_results[uid] = {"status": "running", "progress_pct": pct}
 
             result = _engine(
                 strategy        = strategy,
@@ -148,7 +144,8 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
                 silent          = True,
                 progress_cb     = _progress_cb,
             )
-            _backtest_results[uid] = result or {"status": "done"}
+            with _backtest_lock:
+                _backtest_results[uid] = result or {"status": "done"}
             # 回测成功则持久化历史
             if result and result.get("status") == "done":
                 try:
@@ -156,9 +153,11 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
                 except Exception:
                     pass
         except Exception as e:
-            _backtest_results[uid] = {"status": "error", "error": str(e)}
+            with _backtest_lock:
+                _backtest_results[uid] = {"status": "error", "error": str(e)}
         finally:
-            _backtest_running[uid] = False
+            with _backtest_lock:
+                _backtest_running[uid] = False
 
     threading.Thread(target=_do, daemon=True).start()
     return {"status": "running"}
@@ -167,7 +166,8 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
 @router.get("/backtest/result", summary="获取最近一次回测结果")
 def get_backtest_result(user=Depends(get_current_user)):
     uid = user["id"]
-    result = _backtest_results.get(uid)
+    with _backtest_lock:
+        result = _backtest_results.get(uid)
     # 内存有结果（含 running 状态）直接返回
     if result:
         return result

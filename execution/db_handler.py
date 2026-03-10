@@ -15,15 +15,31 @@ import sqlite3
 import os
 import time
 import json
+import threading
 from datetime import datetime
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 DB_PATH = os.path.join(project_root, "trading_data.db")
 
+# ── 线程局部连接缓存（避免频繁创建/销毁连接）──────────────────────────────────
+_thread_local = threading.local()
+
 
 def get_conn() -> sqlite3.Connection:
-    """获取数据库连接，启用WAL模式以支持多线程并发读写，写入冲突自动重试。"""
+    """
+    获取数据库连接，使用线程局部缓存复用连接。
+    启用WAL模式以支持多线程并发读写。
+    """
+    conn = getattr(_thread_local, 'conn', None)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")  # 验证连接可用
+            return conn
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            # 连接已关闭或损坏，重建
+            _thread_local.conn = None
+
     for attempt in range(5):
         try:
             conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
@@ -31,6 +47,7 @@ def get_conn() -> sqlite3.Connection:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=5000")
+            _thread_local.conn = conn
             return conn
         except sqlite3.OperationalError:
             if attempt == 4:
@@ -38,124 +55,140 @@ def get_conn() -> sqlite3.Connection:
             time.sleep(0.2 * (attempt + 1))
 
 
+def close_thread_conn():
+    """显式关闭当前线程的缓存连接（线程退出时可调用）。"""
+    conn = getattr(_thread_local, 'conn', None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _thread_local.conn = None
+
+
 def init_db():
+    """
+    初始化数据库表结构，带版本号管理。
+    每次新增迁移只需在 _MIGRATIONS 列表尾部追加即可。
+    """
     conn = get_conn()
     c = conn.cursor()
 
+    # ── Schema 版本管理表 ──────────────────────────────────────────────────
     c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            username        TEXT    UNIQUE NOT NULL,
-            hashed_password TEXT    NOT NULL,
-            created_at      TEXT    DEFAULT (datetime('now'))
+        CREATE TABLE IF NOT EXISTS schema_version (
+            id      INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT DEFAULT (datetime('now'))
         )
     ''')
+    row = c.execute("SELECT version FROM schema_version WHERE id=1").fetchone()
+    current_version = row[0] if row else 0
+    if not row:
+        c.execute("INSERT INTO schema_version (id, version) VALUES (1, 0)")
 
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS user_api_keys (
-            user_id        INTEGER PRIMARY KEY REFERENCES users(id),
-            api_key_enc    TEXT,
-            secret_enc     TEXT,
-            passphrase_enc TEXT,
-            is_simulate    INTEGER DEFAULT 0,
-            updated_at     TEXT    DEFAULT (datetime('now'))
-        )
-    ''')
+    # ── 迁移列表：每个元素是 (version_number, description, sql_list) ──────
+    _MIGRATIONS = [
+        (1, "初始表结构", [
+            '''CREATE TABLE IF NOT EXISTS users (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                username        TEXT    UNIQUE NOT NULL,
+                hashed_password TEXT    NOT NULL,
+                created_at      TEXT    DEFAULT (datetime('now'))
+            )''',
+            '''CREATE TABLE IF NOT EXISTS user_api_keys (
+                user_id        INTEGER PRIMARY KEY REFERENCES users(id),
+                api_key_enc    TEXT,
+                secret_enc     TEXT,
+                passphrase_enc TEXT,
+                is_simulate    INTEGER DEFAULT 0,
+                updated_at     TEXT    DEFAULT (datetime('now'))
+            )''',
+            '''CREATE TABLE IF NOT EXISTS user_config (
+                user_id         INTEGER PRIMARY KEY REFERENCES users(id),
+                symbol          TEXT    DEFAULT NULL,
+                timeframe       TEXT    DEFAULT NULL,
+                leverage        REAL    DEFAULT NULL,
+                risk_pct        REAL    DEFAULT NULL,
+                strategy_name   TEXT    DEFAULT NULL,
+                strategy_params TEXT    DEFAULT NULL,
+                risk_config     TEXT    DEFAULT NULL,
+                updated_at      TEXT    DEFAULT (datetime('now'))
+            )''',
+            '''CREATE TABLE IF NOT EXISTS trade_history (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id   INTEGER NOT NULL DEFAULT 0,
+                timestamp TEXT,
+                symbol    TEXT,
+                side      TEXT,
+                action    TEXT,
+                price     REAL,
+                amount    REAL,
+                pnl       REAL DEFAULT 0.0,
+                reason    TEXT
+            )''',
+            '''CREATE TABLE IF NOT EXISTS daily_balance (
+                user_id  INTEGER NOT NULL DEFAULT 0,
+                date     TEXT    NOT NULL,
+                balance  REAL,
+                PRIMARY KEY (user_id, date)
+            )''',
+            '''CREATE TABLE IF NOT EXISTS bot_state (
+                user_id  INTEGER PRIMARY KEY DEFAULT 0,
+                value    TEXT
+            )''',
+            '''CREATE TABLE IF NOT EXISTS risk_state (
+                user_id              INTEGER PRIMARY KEY DEFAULT 0,
+                consecutive_losses   INTEGER DEFAULT 0,
+                daily_start_balance  REAL    DEFAULT NULL,
+                daily_loss_triggered INTEGER DEFAULT 0,
+                last_date            TEXT    DEFAULT NULL,
+                updated_at           TEXT    DEFAULT (datetime('now'))
+            )''',
+            '''CREATE TABLE IF NOT EXISTS user_settings (
+                user_id          INTEGER PRIMARY KEY REFERENCES users(id),
+                tg_bot_token_enc TEXT    DEFAULT NULL,
+                tg_chat_id_enc   TEXT    DEFAULT NULL,
+                updated_at       TEXT    DEFAULT (datetime('now'))
+            )''',
+            '''CREATE TABLE IF NOT EXISTS backtest_history (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id          INTEGER NOT NULL,
+                created_at       TEXT    DEFAULT (datetime('now')),
+                strategy         TEXT,
+                symbol           TEXT,
+                timeframe        TEXT,
+                start_date       TEXT,
+                end_date         TEXT,
+                initial_capital  REAL,
+                final_balance    REAL,
+                roi_pct          REAL,
+                win_rate_pct     REAL,
+                total_trades     INTEGER,
+                max_drawdown_pct REAL,
+                full_result      TEXT
+            )''',
+        ]),
+        (2, "兼容旧库: user_config 添加 risk_config 列", [
+            "ALTER TABLE user_config ADD COLUMN risk_config TEXT DEFAULT NULL",
+        ]),
+        # ── 未来新增迁移追加在这里 ──────────────────────────────────────────
+        # (3, "xxx", ["ALTER TABLE ..."]),
+    ]
 
-    # ── 每用户策略/交易配置（新增）──────────────────────────────────────────
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS user_config (
-            user_id         INTEGER PRIMARY KEY REFERENCES users(id),
-            symbol          TEXT    DEFAULT NULL,
-            timeframe       TEXT    DEFAULT NULL,
-            leverage        REAL    DEFAULT NULL,
-            risk_pct        REAL    DEFAULT NULL,
-            strategy_name   TEXT    DEFAULT NULL,
-            strategy_params TEXT    DEFAULT NULL,
-            risk_config     TEXT    DEFAULT NULL,
-            updated_at      TEXT    DEFAULT (datetime('now'))
-        )
-    ''')
-    # 兼容旧数据库：若 risk_config 列不存在则添加
-    try:
-        c.execute("ALTER TABLE user_config ADD COLUMN risk_config TEXT DEFAULT NULL")
+    for version, desc, sqls in _MIGRATIONS:
+        if version <= current_version:
+            continue
+        for sql in sqls:
+            try:
+                c.execute(sql)
+            except Exception:
+                pass  # CREATE IF NOT EXISTS / ALTER 已存在时忽略
+        c.execute("UPDATE schema_version SET version=?, updated_at=datetime('now') WHERE id=1",
+                  (version,))
         conn.commit()
-    except Exception:
-        pass  # 列已存在，忽略
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS trade_history (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id   INTEGER NOT NULL DEFAULT 0,
-            timestamp TEXT,
-            symbol    TEXT,
-            side      TEXT,
-            action    TEXT,
-            price     REAL,
-            amount    REAL,
-            pnl       REAL DEFAULT 0.0,
-            reason    TEXT
-        )
-    ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS daily_balance (
-            user_id  INTEGER NOT NULL DEFAULT 0,
-            date     TEXT    NOT NULL,
-            balance  REAL,
-            PRIMARY KEY (user_id, date)
-        )
-    ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS bot_state (
-            user_id  INTEGER PRIMARY KEY DEFAULT 0,
-            value    TEXT
-        )
-    ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS risk_state (
-            user_id              INTEGER PRIMARY KEY DEFAULT 0,
-            consecutive_losses   INTEGER DEFAULT 0,
-            daily_start_balance  REAL    DEFAULT NULL,
-            daily_loss_triggered INTEGER DEFAULT 0,
-            last_date            TEXT    DEFAULT NULL,
-            updated_at           TEXT    DEFAULT (datetime('now'))
-        )
-    ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS user_settings (
-            user_id          INTEGER PRIMARY KEY REFERENCES users(id),
-            tg_bot_token_enc TEXT    DEFAULT NULL,
-            tg_chat_id_enc   TEXT    DEFAULT NULL,
-            updated_at       TEXT    DEFAULT (datetime('now'))
-        )
-    ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS backtest_history (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id          INTEGER NOT NULL,
-            created_at       TEXT    DEFAULT (datetime('now')),
-            strategy         TEXT,
-            symbol           TEXT,
-            timeframe        TEXT,
-            start_date       TEXT,
-            end_date         TEXT,
-            initial_capital  REAL,
-            final_balance    REAL,
-            roi_pct          REAL,
-            win_rate_pct     REAL,
-            total_trades     INTEGER,
-            max_drawdown_pct REAL,
-            full_result      TEXT
-        )
-    ''')
 
     conn.commit()
-    conn.close()
 
 
 # ── 回测历史存取 ──────────────────────────────────────────────────────────────
@@ -164,56 +197,50 @@ def save_backtest_history(user_id: int, result: dict):
     """保存一次回测结果，每用户最多保留最近 20 条。"""
     import json as _json
     conn = get_conn()
-    try:
-        conn.execute('''
-            INSERT INTO backtest_history
-              (user_id, strategy, symbol, timeframe,
-               start_date, end_date, initial_capital, final_balance,
-               roi_pct, win_rate_pct, total_trades, max_drawdown_pct, full_result)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            user_id,
-            result.get("strategy"),
-            result.get("symbol"),
-            result.get("timeframe"),
-            result.get("start_date"),
-            result.get("end_date"),
-            result.get("initial_capital"),
-            result.get("final_balance"),
-            result.get("roi_pct"),
-            result.get("win_rate_pct"),
-            result.get("total_trades"),
-            result.get("max_drawdown_pct"),
-            _json.dumps(result, ensure_ascii=False),
-        ))
-        # 超过 20 条时删除最旧的
-        conn.execute('''
-            DELETE FROM backtest_history
-            WHERE user_id = ? AND id NOT IN (
-                SELECT id FROM backtest_history
-                WHERE user_id = ?
-                ORDER BY id DESC LIMIT 20
-            )
-        ''', (user_id, user_id))
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute('''
+        INSERT INTO backtest_history
+          (user_id, strategy, symbol, timeframe,
+           start_date, end_date, initial_capital, final_balance,
+           roi_pct, win_rate_pct, total_trades, max_drawdown_pct, full_result)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        user_id,
+        result.get("strategy"),
+        result.get("symbol"),
+        result.get("timeframe"),
+        result.get("start_date"),
+        result.get("end_date"),
+        result.get("initial_capital"),
+        result.get("final_balance"),
+        result.get("roi_pct"),
+        result.get("win_rate_pct"),
+        result.get("total_trades"),
+        result.get("max_drawdown_pct"),
+        _json.dumps(result, ensure_ascii=False),
+    ))
+    # 超过 20 条时删除最旧的
+    conn.execute('''
+        DELETE FROM backtest_history
+        WHERE user_id = ? AND id NOT IN (
+            SELECT id FROM backtest_history
+            WHERE user_id = ?
+            ORDER BY id DESC LIMIT 20
+        )
+    ''', (user_id, user_id))
+    conn.commit()
 
 
 def load_backtest_history(user_id: int) -> list:
     """返回该用户最近 20 条回测摘要（不含 full_result）。"""
     conn = get_conn()
-    try:
-        rows = conn.execute('''
-            SELECT id, created_at, strategy, symbol, timeframe,
-                   start_date, end_date, initial_capital, final_balance,
-                   roi_pct, win_rate_pct, total_trades, max_drawdown_pct
-            FROM backtest_history
-            WHERE user_id = ?
-            ORDER BY id DESC LIMIT 20
-        ''', (user_id,)).fetchall()
-    finally:
-        conn.close()
+    rows = conn.execute('''
+        SELECT id, created_at, strategy, symbol, timeframe,
+               start_date, end_date, initial_capital, final_balance,
+               roi_pct, win_rate_pct, total_trades, max_drawdown_pct
+        FROM backtest_history
+        WHERE user_id = ?
+        ORDER BY id DESC LIMIT 20
+    ''', (user_id,)).fetchall()
     keys = ["id", "created_at", "strategy", "symbol", "timeframe",
             "start_date", "end_date", "initial_capital", "final_balance",
             "roi_pct", "win_rate_pct", "total_trades", "max_drawdown_pct"]
@@ -224,13 +251,10 @@ def load_backtest_history_detail(user_id: int, history_id: int) -> dict | None:
     """返回某条历史回测的完整结果（含 equity_curve）。"""
     import json as _json
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT full_result FROM backtest_history WHERE id=? AND user_id=?",
-            (history_id, user_id)
-        ).fetchone()
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT full_result FROM backtest_history WHERE id=? AND user_id=?",
+        (history_id, user_id)
+    ).fetchone()
     if not row or not row[0]:
         return None
     try:
@@ -247,64 +271,61 @@ def save_user_config(user_id: int, config: dict):
     config 是一个 dict，key 为字段名，只更新传入的字段。
     """
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM user_config WHERE user_id=?", (user_id,)
-        ).fetchone()
+    row = conn.execute(
+        "SELECT * FROM user_config WHERE user_id=?", (user_id,)
+    ).fetchone()
 
-        strategy_params = config.get("strategy_params")
-        if strategy_params is not None and isinstance(strategy_params, dict):
-            strategy_params = json.dumps(strategy_params, ensure_ascii=False)
+    strategy_params = config.get("strategy_params")
+    if strategy_params is not None and isinstance(strategy_params, dict):
+        strategy_params = json.dumps(strategy_params, ensure_ascii=False)
 
-        _RISK_KEYS = ("max_consecutive_losses", "daily_loss_limit_pct", "max_trade_amount")
-        if row:
-            fields = []
-            values = []
-            for key in ("symbol", "timeframe", "leverage", "risk_pct", "strategy_name"):
-                if key in config:
-                    fields.append(f"{key}=?")
-                    values.append(config[key])
-            if strategy_params is not None:
-                fields.append("strategy_params=?")
-                values.append(strategy_params)
-            # 风控参数：存入 JSON 字段（复用 strategy_params 思路，用单独字段更清晰）
-            risk_cfg = {k: config[k] for k in _RISK_KEYS if k in config}
-            if risk_cfg:
-                # 读取已有 risk_config，合并后写回
-                existing_risk = {}
-                try:
-                    existing_risk = json.loads(row["risk_config"] or "{}") if "risk_config" in row.keys() else {}
-                except Exception:
-                    pass
-                existing_risk.update(risk_cfg)
-                fields.append("risk_config=?")
-                values.append(json.dumps(existing_risk))
-            fields.append("updated_at=datetime('now')")
-            values.append(user_id)
-            conn.execute(
-                f"UPDATE user_config SET {', '.join(fields)} WHERE user_id=?",
-                values
-            )
-        else:
-            risk_cfg = {k: config[k] for k in _RISK_KEYS if k in config}
-            conn.execute('''
-                INSERT INTO user_config
-                  (user_id, symbol, timeframe, leverage, risk_pct,
-                   strategy_name, strategy_params, risk_config, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ''', (
-                user_id,
-                config.get("symbol"),
-                config.get("timeframe"),
-                config.get("leverage"),
-                config.get("risk_pct"),
-                config.get("strategy_name"),
-                strategy_params,
-                json.dumps(risk_cfg) if risk_cfg else None,
-            ))
-        conn.commit()
-    finally:
-        conn.close()
+    _RISK_KEYS = ("max_consecutive_losses", "daily_loss_limit_pct", "max_trade_amount")
+    if row:
+        fields = []
+        values = []
+        for key in ("symbol", "timeframe", "leverage", "risk_pct", "strategy_name"):
+            if key in config:
+                fields.append(f"{key}=?")
+                values.append(config[key])
+        if strategy_params is not None:
+            fields.append("strategy_params=?")
+            values.append(strategy_params)
+        # 风控参数：存入 JSON 字段（复用 strategy_params 思路，用单独字段更清晰）
+        risk_cfg = {k: config[k] for k in _RISK_KEYS if k in config}
+        if risk_cfg:
+            # 读取已有 risk_config，合并后写回
+            existing_risk = {}
+            try:
+                existing_risk = json.loads(row["risk_config"] or "{}") if "risk_config" in row.keys() else {}
+            except Exception:
+                pass
+            existing_risk.update(risk_cfg)
+            fields.append("risk_config=?")
+            values.append(json.dumps(existing_risk))
+        fields.append("updated_at=datetime('now')")
+        values.append(user_id)
+        conn.execute(
+            f"UPDATE user_config SET {', '.join(fields)} WHERE user_id=?",
+            values
+        )
+    else:
+        risk_cfg = {k: config[k] for k in _RISK_KEYS if k in config}
+        conn.execute('''
+            INSERT INTO user_config
+              (user_id, symbol, timeframe, leverage, risk_pct,
+               strategy_name, strategy_params, risk_config, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ''', (
+            user_id,
+            config.get("symbol"),
+            config.get("timeframe"),
+            config.get("leverage"),
+            config.get("risk_pct"),
+            config.get("strategy_name"),
+            strategy_params,
+            json.dumps(risk_cfg) if risk_cfg else None,
+        ))
+    conn.commit()
 
 
 def load_user_config(user_id: int) -> dict:
@@ -312,12 +333,9 @@ def load_user_config(user_id: int) -> dict:
     加载用户个性化配置，未配置的字段返回 None（调用方应 fallback 到 config.yaml）。
     """
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM user_config WHERE user_id=?", (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT * FROM user_config WHERE user_id=?", (user_id,)
+    ).fetchone()
 
     if not row:
         return {}
@@ -359,27 +377,21 @@ def load_user_config(user_id: int) -> dict:
 
 def save_tg_config(user_id: int, tg_bot_token_enc: str, tg_chat_id_enc: str):
     conn = get_conn()
-    try:
-        conn.execute('''
-            INSERT OR REPLACE INTO user_settings
-              (user_id, tg_bot_token_enc, tg_chat_id_enc, updated_at)
-            VALUES (?, ?, ?, datetime('now'))
-        ''', (user_id, tg_bot_token_enc, tg_chat_id_enc))
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute('''
+        INSERT OR REPLACE INTO user_settings
+          (user_id, tg_bot_token_enc, tg_chat_id_enc, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+    ''', (user_id, tg_bot_token_enc, tg_chat_id_enc))
+    conn.commit()
 
 
 def load_tg_config(user_id: int) -> dict:
     """返回加密存储的 token/chat_id，调用方负责解密。未配置则返回空字符串。"""
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT tg_bot_token_enc, tg_chat_id_enc FROM user_settings WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT tg_bot_token_enc, tg_chat_id_enc FROM user_settings WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
     if row:
         return {
             "tg_bot_token_enc": row["tg_bot_token_enc"] or "",
@@ -395,29 +407,23 @@ def save_risk_state(user_id: int, consecutive_losses: int,
                     last_date: str = None):
     today = last_date or datetime.now().strftime('%Y-%m-%d')
     conn = get_conn()
-    try:
-        conn.execute('''
-            INSERT OR REPLACE INTO risk_state
-              (user_id, consecutive_losses, daily_start_balance,
-               daily_loss_triggered, last_date, updated_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-        ''', (user_id, consecutive_losses,
-              daily_start_balance,
-              1 if daily_loss_triggered else 0,
-              today))
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute('''
+        INSERT OR REPLACE INTO risk_state
+          (user_id, consecutive_losses, daily_start_balance,
+           daily_loss_triggered, last_date, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+    ''', (user_id, consecutive_losses,
+          daily_start_balance,
+          1 if daily_loss_triggered else 0,
+          today))
+    conn.commit()
 
 
 def load_risk_state(user_id: int) -> dict:
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM risk_state WHERE user_id=?", (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT * FROM risk_state WHERE user_id=?", (user_id,)
+    ).fetchone()
     if row:
         return {
             "consecutive_losses":   int(row["consecutive_losses"]),
@@ -449,14 +455,11 @@ def record_balance(user_id_or_balance, balance: float = None):
 
     today = datetime.now().strftime('%Y-%m-%d')
     conn = get_conn()
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO daily_balance (user_id, date, balance) VALUES (?, ?, ?)",
-            (_user_id, today, _balance)
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute(
+        "INSERT OR REPLACE INTO daily_balance (user_id, date, balance) VALUES (?, ?, ?)",
+        (_user_id, today, _balance)
+    )
+    conn.commit()
 
 
 # ── record_trade（单/多用户兼容）─────────────────────────────────────────────
@@ -472,16 +475,13 @@ def record_trade(user_id=None, side=None, price=None, amount=None,
     _user_id = 0 if (user_id is None) else int(user_id)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     conn = get_conn()
-    try:
-        conn.execute('''
-            INSERT INTO trade_history
-              (user_id, timestamp, symbol, side, action, price, amount, pnl, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (_user_id, now, symbol, side, action,
-              float(price or 0), float(amount or 0), pnl, reason))
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute('''
+        INSERT INTO trade_history
+          (user_id, timestamp, symbol, side, action, price, amount, pnl, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (_user_id, now, symbol, side, action,
+          float(price or 0), float(amount or 0), pnl, reason))
+    conn.commit()
 
 
 # init_db() 已移至 api/server.py 的 startup 事件中显式调用，

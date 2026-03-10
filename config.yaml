@@ -32,8 +32,8 @@ selector:
   bb_squeeze_pct:   0.03       # 布林带宽度/中轨 < 此值认为挤压
 
   # 权重配置
-  tech_weight:      0.7        # 技术面权重
-  news_weight:      0.3        # 新闻面权重
+  tech_weight:      1.0        # 技术面权重（AI情绪分析未接入时建议设为1.0）
+  news_weight:      0.0        # 新闻面权重（AI客户端未配置时设为0，避免空壳影响）
   news_max_age_min: 120        # 新闻数据超过此分钟数则忽略
 
   # 防抖：连续 N 轮确认才切换策略（避免频繁抖动）
@@ -79,4 +79,7 @@ api:
   host: "0.0.0.0"
   port: 8080
   enable: true
+  # CORS 允许的源列表，生产环境请替换为实际域名
+  # 例如: ["https://your-domain.com", "https://admin.your-domain.com"]
+  cors_origins: ["*"]
 

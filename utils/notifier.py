@@ -1,9 +1,10 @@
 """
-utils/notifier.py - Telegram 消息推送工具（支持全局配置和每用户独立配置）
+utils/notifier.py - 消息推送工具（支持 Telegram + Webhook）
 
 用法：
-  - 全局（单用户 / 后备）：send_telegram_msg("消息")
-  - 每用户：make_notifier(token, chat_id) 返回绑定了凭证的发送函数
+  - Telegram 全局：send_telegram_msg("消息")
+  - Telegram 每用户：make_notifier(token, chat_id)
+  - Webhook：make_webhook_notifier(url, headers) → 向指定 URL POST JSON
 """
 import os
 import requests
@@ -69,6 +70,68 @@ def make_notifier(token: str, chat_id: str):
     return _send
 
 
+# ── Webhook 通知渠道 ──────────────────────────────────────────────────────────
+
+def _do_webhook_send(url: str, message: str, headers: dict = None) -> bool:
+    """向指定 Webhook URL 发送 JSON 消息。"""
+    if not url:
+        return False
+    payload = {
+        "text": message,
+        "content": message,   # 兼容 Discord / 企业微信等格式
+    }
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=headers or {"Content-Type": "application/json"},
+            timeout=_TIMEOUT,
+        )
+        return 200 <= resp.status_code < 300
+    except Exception:
+        return False
+
+
+def make_webhook_notifier(url: str, headers: dict = None):
+    """
+    工厂函数：返回一个绑定了 Webhook URL 的发送函数。
+
+    用法：
+        notify = make_webhook_notifier("https://hooks.slack.com/...")
+        notify("消息内容")
+    """
+    if not url:
+        return None
+
+    def _send(message: str) -> bool:
+        ok = _do_webhook_send(url, message, headers)
+        if not ok:
+            print(f"❌ [Webhook] 推送失败 (url={url[:30]}...)")
+        return ok
+
+    return _send
+
+
+def make_multi_notifier(*notifiers):
+    """
+    组合多个通知器，按顺序依次发送（任一成功即视为成功）。
+
+    用法：
+        tg = make_notifier(token, chat_id)
+        wh = make_webhook_notifier(url)
+        notify = make_multi_notifier(tg, wh)
+        notify("消息")
+    """
+    active = [n for n in notifiers if n is not None]
+    if not active:
+        return None
+
+    def _send(message: str) -> bool:
+        return any(n(message) for n in active)
+
+    return _send
+
+
 def test_notify(token: str, chat_id: str) -> tuple[bool, str]:
     """
     测试一个 token+chat_id 组合是否可用。
@@ -81,6 +144,16 @@ def test_notify(token: str, chat_id: str) -> tuple[bool, str]:
     if ok:
         return True, "发送成功"
     return False, "发送失败，请检查 Token 和 Chat ID 是否正确"
+
+
+def test_webhook(url: str) -> tuple[bool, str]:
+    """测试 Webhook URL 是否可用。"""
+    if not url:
+        return False, "Webhook URL 不能为空"
+    ok = _do_webhook_send(url, "🤖 QuantBot Webhook 通知测试\n✅ 配置成功！")
+    if ok:
+        return True, "发送成功"
+    return False, "发送失败，请检查 Webhook URL 是否正确"
 
 
 # --- 本地测试 ---

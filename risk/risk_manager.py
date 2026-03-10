@@ -81,14 +81,22 @@ class RiskManager:
     def is_fused(self) -> bool:
         return not self.is_trading_allowed
 
-    def check_order(self, symbol: str, side: str, amount: int) -> bool:
+    def check_order(self, symbol: str, side: str, amount: int,
+                    notional_usdt: float = None) -> bool:
+        """
+        风控前置检查。
+
+        :param amount: 合约张数
+        :param notional_usdt: 此笔订单的名义金额(USDT)，用于与 max_trade_amount 比较。
+                              若不传则跳过金额检查（由调用方在外部做换算判断）。
+        """
         if not self.is_trading_allowed:
             logger.warning("❌ 风控拦截：系统当前禁止交易（连亏熔断或日亏熔断）。")
             return False
-        if amount > self.max_trade_amount:
+        if notional_usdt is not None and notional_usdt > self.max_trade_amount:
             logger.warning(
-                "❌ 风控拦截：单笔下单数量 (%d) 超过硬性上限 (%d)。",
-                amount, self.max_trade_amount,
+                "❌ 风控拦截：单笔金额 (%.2f USDT) 超过硬性上限 (%d USDT)。",
+                notional_usdt, self.max_trade_amount,
             )
             return False
         if amount <= 0:
@@ -115,7 +123,14 @@ class RiskManager:
             return 0
 
         target_contracts = int(math.floor(max_loss_allowed / total_risk_per_contract))
-        target_contracts = min(target_contracts, self.max_trade_amount)
+
+        # Fix: max_trade_amount 是 USDT 金额上限，需换算为张数上限再比较
+        notional_per_contract = entry_price * contract_size
+        if notional_per_contract > 0:
+            max_contracts_by_amount = int(math.floor(
+                self.max_trade_amount / (notional_per_contract / leverage)
+            ))
+            target_contracts = min(target_contracts, max_contracts_by_amount)
 
         while target_contracts > 0:
             notional       = target_contracts * contract_size * entry_price

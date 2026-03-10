@@ -73,6 +73,13 @@ export default function BacktestPage() {
   const [errMsg,   setErrMsg]   = useState('')
   const pollRef = useRef(null)
 
+  // 组件卸载时清除轮询 timer，防止内存泄漏
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
+  }, [])
+
   // 加载策略列表
   useEffect(() => {
     dataApi.strategies().then(r => {

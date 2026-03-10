@@ -29,16 +29,29 @@ from risk.risk_manager import RiskManager
 
 # ── 每用户 Telegram 通知 ────────────────────────────────────────────────────────
 
-def _load_user_notifier(user_id: int):
+def _load_user_notifier(user_id: int, logger=None):
+    """
+    加载用户的 Telegram 通知函数。
+    返回 (notifier_func, error_msg)：
+      - 成功：(func, None)
+      - 未配置：(None, "not_configured")
+      - 解密失败：(None, "decrypt_error: ...")
+    """
     try:
         raw = load_tg_config(user_id)
         if not raw["tg_bot_token_enc"] or not raw["tg_chat_id_enc"]:
-            return None
+            return None, "not_configured"
         token   = decrypt(raw["tg_bot_token_enc"])
         chat_id = decrypt(raw["tg_chat_id_enc"])
-        return make_notifier(token, chat_id)
-    except Exception:
-        return None
+        if not token or not chat_id:
+            return None, "decrypted_empty"
+        notifier = make_notifier(token, chat_id)
+        return notifier, None
+    except Exception as e:
+        err = f"decrypt_error: {e}"
+        if logger:
+            logger.error(f"[user_id={user_id}] Telegram 配置加载失败: {err}")
+        return None, err
 
 
 # ── 告警去重（同类错误 5 分钟内只推一次）────────────────────────────────────────
@@ -101,12 +114,9 @@ def _empty_state() -> dict:
 
 def _load_state(user_id: int) -> dict:
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT value FROM bot_state WHERE user_id=?", (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT value FROM bot_state WHERE user_id=?", (user_id,)
+    ).fetchone()
     if row:
         s = json.loads(row[0])
         empty = _empty_state()
@@ -119,14 +129,11 @@ def _load_state(user_id: int) -> dict:
 
 def _save_state(user_id: int, state: dict):
     conn = get_conn()
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO bot_state (user_id, value) VALUES (?, ?)",
-            (user_id, json.dumps(state, ensure_ascii=False))
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute(
+        "INSERT OR REPLACE INTO bot_state (user_id, value) VALUES (?, ?)",
+        (user_id, json.dumps(state, ensure_ascii=False))
+    )
+    conn.commit()
 
 
 def _clear_state(user_id: int):
@@ -147,27 +154,31 @@ def _resolve_config(user_id: int) -> dict:
 
     user_cfg = load_user_config(user_id)
 
-    # 风控参数：用户 DB 配置优先，fallback 全局 config.yaml
-    max_consecutive_losses = (
-        user_cfg.get("max_consecutive_losses")
-        or rc.get("max_consecutive_losses", 3)
+    # Fix: 使用 is not None 替代 or，避免用户配置 0 值时被 fallback 覆盖
+    def _pick(user_val, fallback_val):
+        """用户配置优先（允许 0/空字符串等 falsy 值），仅当 None 时 fallback。"""
+        return user_val if user_val is not None else fallback_val
+
+    max_consecutive_losses = _pick(
+        user_cfg.get("max_consecutive_losses"),
+        rc.get("max_consecutive_losses", 3),
     )
-    daily_loss_limit_pct = (
-        user_cfg.get("daily_loss_limit_pct")
-        or rc.get("daily_loss_limit_pct", 0.05)
+    daily_loss_limit_pct = _pick(
+        user_cfg.get("daily_loss_limit_pct"),
+        rc.get("daily_loss_limit_pct", 0.05),
     )
-    max_trade_amount = (
-        user_cfg.get("max_trade_amount")
-        or rc.get("max_trade_amount", 1000)
+    max_trade_amount = _pick(
+        user_cfg.get("max_trade_amount"),
+        rc.get("max_trade_amount", 1000),
     )
 
     return {
-        "symbol":          user_cfg.get("symbol")        or bc.get("symbol",           "BTC/USDT:USDT"),
-        "timeframe":       user_cfg.get("timeframe")     or bc.get("timeframe",         "1h"),
-        "leverage":        user_cfg.get("leverage")      or bc.get("leverage",           3),
-        "risk_pct":        user_cfg.get("risk_pct")      or rc.get("risk_per_trade_pct", 0.01),
-        "strategy_name":   user_cfg.get("strategy_name") or sc.get("name",              "PA_5S"),
-        "strategy_params": user_cfg.get("strategy_params") or sc.get("params",          {}),
+        "symbol":          _pick(user_cfg.get("symbol"),          bc.get("symbol",           "BTC/USDT:USDT")),
+        "timeframe":       _pick(user_cfg.get("timeframe"),       bc.get("timeframe",         "1h")),
+        "leverage":        _pick(user_cfg.get("leverage"),        bc.get("leverage",           3)),
+        "risk_pct":        _pick(user_cfg.get("risk_pct"),        rc.get("risk_per_trade_pct", 0.01)),
+        "strategy_name":   _pick(user_cfg.get("strategy_name"),   sc.get("name",              "PA_5S")),
+        "strategy_params": _pick(user_cfg.get("strategy_params"), sc.get("params",            {})),
         "contract_size":   bc.get("contract_size",    0.01),
         "taker_fee_rate":  bc.get("taker_fee_rate",   0.0005),
         "check_interval":  bc.get("check_interval",   300),
@@ -234,11 +245,21 @@ def _place_algo(ex, symbol: str, side: str, amount: float,
         return None
 
 
-def _cancel_all_algo(ex, symbol: str):
+def _cancel_all_algo(ex, symbol: str, logger=None, notify=None, tag: str = ""):
+    """取消所有条件单。失败时记录日志并发出告警，避免旧 SL/TP 残留。"""
     try:
         ex.cancel_all_orders(symbol, params={"stop": True})
     except Exception as e:
-        pass
+        err_msg = f"{tag} ⚠️ 取消条件单失败: {e}"
+        if logger:
+            logger.error(err_msg)
+        else:
+            bot_logger.error(err_msg)
+        if notify:
+            try:
+                notify(f"⚠️ <b>取消条件单失败</b>\n{str(e)[:200]}\n请人工检查是否有残留条件单！")
+            except Exception:
+                pass
 
 
 def _live_position_amount(ex, symbol: str) -> float:
@@ -490,10 +511,30 @@ def run_user_bot(bot_state, override_strategy: str = None):
     except Exception:
         pass
 
-    notify = _load_user_notifier(user_id)
+    notify, tg_err = _load_user_notifier(user_id, logger=logger)
     if notify is None:
-        notify = send_telegram_msg
-        logger.info(f"{tag} 用户未配置 Telegram，使用全局后备配置")
+        if tg_err == "not_configured":
+            logger.warning(
+                f"{tag} ⚠️ 用户未配置 Telegram 通知！开仓/平仓消息将不会推送。"
+                f"请在设置页面配置 Telegram Bot Token 和 Chat ID。"
+            )
+        elif tg_err == "decrypted_empty":
+            logger.warning(f"{tag} ⚠️ Telegram 配置解密后为空，请重新保存配置")
+        else:
+            logger.error(f"{tag} ⚠️ Telegram 配置加载失败: {tg_err}")
+
+        # 尝试使用全局 .env 后备（旧版单用户部署兼容）
+        from utils.notifier import _GLOBAL_TOKEN, _GLOBAL_CHAT_ID
+        if _GLOBAL_TOKEN and _GLOBAL_CHAT_ID:
+            notify = send_telegram_msg
+            logger.info(f"{tag} 已 fallback 到全局 .env Telegram 配置")
+        else:
+            # 定义一个空操作 notifier，避免后续调用时 NoneType 崩溃
+            def _noop_notify(msg: str) -> bool:
+                logger.debug(f"{tag} [通知跳过] {msg[:80]}...")
+                return False
+            notify = _noop_notify
+            logger.warning(f"{tag} 全局 Telegram 也未配置，所有通知将被跳过！")
 
     logger.info(f"{tag} Bot 启动，策略={cfg['strategy_name']}，品种={SYMBOL}")
     notify(
@@ -612,9 +653,14 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     logger.info(
                         f"{tag} 仓位已被动平仓，净盈亏={net_pnl:+.2f}U ({fill_src})"
                     )
+                    _entry = state["entry_price"]
+                    _side_label = "多" if is_long else "空"
                     notify(
-                        f"{pnl_emoji} <b>{username} 仓位已闭合（托管单触发）</b>\n"
-                        f"成交价: {est_fill:.2f} | 净盈亏: {net_pnl:+.2f} U\n"
+                        f"{pnl_emoji} <b>{username} 平仓（托管单触发）</b>\n"
+                        f"品种: {SYMBOL} | 杠杆: {LEVERAGE}x | 方向: {_side_label}\n"
+                        f"入场价: {_entry:.2f} → 出场价: {est_fill:.2f}\n"
+                        f"止损: {state['active_sl']:.2f} | 止盈: {state['active_tp1']:.2f}\n"
+                        f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
                         f"来源: {fill_src}"
                     )
                     if rm.is_fused:
@@ -732,7 +778,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     # SL 挂单失败 → 立即平仓保命
                     logger.error(f"{tag} 🚨 SL 挂单失败！回滚平仓！")
                     notify(f"🚨 <b>{username}</b> SL 挂单失败，已紧急平仓！")
-                    _cancel_all_algo(ex, SYMBOL)
+                    _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
                     # ── Bug fix: 紧急平仓加 try/except ──────────────────────
                     # 若紧急平仓也失败，必须告警并标记持仓状态，防止下轮误重复开仓。
                     try:
@@ -786,9 +832,11 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 emoji = "🟢" if action == "BUY" else "🔴"
                 notify(
                     f"{emoji} <b>{username} {'开多' if action=='BUY' else '开空'}</b>\n"
-                    f"价格: {fill_price:.2f} | 数量: {contracts}张\n"
-                    f"SL: {target_sl:.2f} | TP: {target_tp:.2f}\n"
-                    f"预估风险: ~{usdt_free * RISK_PCT:.2f} U\n原因: {reason}"
+                    f"品种: {SYMBOL} | 杠杆: {LEVERAGE}x\n"
+                    f"入场价: {fill_price:.2f} | 数量: {contracts}张\n"
+                    f"止损: {target_sl:.2f} | 止盈: {target_tp:.2f}\n"
+                    f"保证金: ~{margin_used:.2f} U | 风险: ~{usdt_free * RISK_PCT:.2f} U\n"
+                    f"策略: {strategy.name} | 原因: {reason}"
                 )
 
             # ══════════════ 有仓 → TP1到达后移SL到保本 & 检测部分平仓 ══════════
@@ -806,7 +854,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     remaining = total_amt - tp1_amt
                     if 0 < live_amt_check <= remaining:
                         logger.info(f"{tag} TP1已触发，移SL至保本，挂TP2")
-                        _cancel_all_algo(ex, SYMBOL)
+                        _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
 
                         breakeven_sl = entry
                         new_sl = _place_algo(ex, SYMBOL, close_side, live_amt_check,
@@ -841,7 +889,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 if not is_long and action == "BUY":  close_reason = f"策略反转: {reason}"
 
                 if close_reason:
-                    _cancel_all_algo(ex, SYMBOL)
+                    _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
 
                     close_params = {"tdMode": "cross", "reduceOnly": True}
                     if cached_pos_mode == "hedge":
@@ -882,9 +930,12 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     state = _load_state(user_id)
 
                     pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
+                    _side_label = "多" if is_long else "空"
                     notify(
                         f"{pnl_emoji} <b>{username} 平仓</b>\n"
-                        f"价格: {fill_price:.2f} | 净盈亏: {net_pnl:+.2f} U\n"
+                        f"品种: {SYMBOL} | 杠杆: {LEVERAGE}x | 方向: {_side_label}\n"
+                        f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
+                        f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
                         f"原因: {close_reason}"
                     )
 

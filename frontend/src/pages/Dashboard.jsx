@@ -22,26 +22,64 @@ export default function Dashboard({ username }) {
     try { const r = await botApi.status(); setStatus(r.data) } catch {}
   }
 
+  // 用于检测 token 变更（重新登录后 WS 应使用新 token）
+  const tokenRef = useRef(localStorage.getItem('token'))
+
   useEffect(() => {
+    const currentToken = localStorage.getItem('token')
+    tokenRef.current = currentToken
+
     // 拉取策略列表
     dataApi.strategies().then(r => setStrategies(r.data || [])).catch(() => {})
 
     fetchStatus()
     const t = setInterval(fetchStatus, 15000)
 
-    const token  = localStorage.getItem('token')
-    const wsBase = (import.meta.env.VITE_API_BASE || window.location.origin).replace(/^http/, 'ws')
-    const ws     = new WebSocket(`${wsBase}/ws/status?token=${token}`)
-    wsRef.current = ws
-    ws.onopen    = () => setWsOk(true)
-    ws.onclose   = () => setWsOk(false)
-    ws.onerror   = () => setWsOk(false)
-    ws.onmessage = e => {
-      try { setWsData(JSON.parse(e.data)) } catch {}
-    }
+    // ── WebSocket 自动重连（指数退避）──────────────────────────────────────
+    let ws = null
+    let reconnectTimer = null
+    let reconnectDelay = 1000   // 初始 1 秒
+    const MAX_DELAY = 30000     // 最大 30 秒
+    let stopped = false
 
-    return () => { clearInterval(t); ws.close() }
-  }, [])
+    const connectWs = () => {
+      if (stopped) return
+      const token  = localStorage.getItem('token')
+      if (!token) return  // 未登录，不连接
+      const wsBase = (import.meta.env.VITE_API_BASE || window.location.origin).replace(/^http/, 'ws')
+      ws = new WebSocket(`${wsBase}/ws/status?token=${token}`)
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        setWsOk(true)
+        reconnectDelay = 1000  // 连接成功后重置退避
+      }
+      ws.onclose = () => {
+        setWsOk(false)
+        if (!stopped) {
+          reconnectTimer = setTimeout(() => {
+            reconnectDelay = Math.min(reconnectDelay * 2, MAX_DELAY)
+            connectWs()
+          }, reconnectDelay)
+        }
+      }
+      ws.onerror = () => {
+        setWsOk(false)
+        ws.close()  // 触发 onclose 的重连逻辑
+      }
+      ws.onmessage = e => {
+        try { setWsData(JSON.parse(e.data)) } catch {}
+      }
+    }
+    connectWs()
+
+    return () => {
+      stopped = true
+      clearInterval(t)
+      clearTimeout(reconnectTimer)
+      if (ws) ws.close()
+    }
+  }, [username])
 
   // 点击外部关闭策略菜单
   useEffect(() => {
@@ -342,8 +380,8 @@ export default function Dashboard({ username }) {
               { label:'止损价 (SL)', value: activeSl ? `$${activeSl.toLocaleString()}` : '—', color:'var(--red)' },
               { label:'止盈价 (TP1)', value: activeTp ? `$${activeTp.toLocaleString()}` : '—', color:'var(--green)' },
               { label:'预期风险',
-                value: activeSl && entryPx && posAmt
-                  ? `~${Math.abs((entryPx - activeSl) * posAmt * 0.01).toFixed(2)} U`
+                value: activeSl && entryPx && posAmt && curPrice
+                  ? `~${Math.abs((entryPx - activeSl) * posAmt * (d.contract_size || 0.01)).toFixed(2)} U`
                   : '—',
                 color:'var(--yellow)' },
             ].map(({ label, value, color }) => (

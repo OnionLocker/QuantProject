@@ -7,10 +7,8 @@ from pydantic import BaseModel
 from typing import Optional
 from api.auth.jwt_handler import get_current_user
 from core.user_bot import manager as bot_mgr
-from utils.trade_state import load_state  # 兼容单用户版（多用户用 _load_state）
 import json
-from execution.db_handler import DB_PATH
-import sqlite3
+from execution.db_handler import get_conn
 
 router = APIRouter(prefix="/api/bot", tags=["bot"])
 
@@ -20,9 +18,8 @@ class StartBotBody(BaseModel):
 
 
 def _load_user_state(user_id: int) -> dict:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     row = conn.execute("SELECT value FROM bot_state WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
     if row:
         return json.loads(row[0])
     return {}
@@ -65,4 +62,11 @@ def resume_risk(user=Depends(get_current_user)):
     if not state:
         return JSONResponse(status_code=400, content={"error": "Bot 未初始化"})
     state.risk_manager.manual_resume()
+    # 熔断后 Bot 线程可能已退出，需要持久化清零并重启
+    from execution.db_handler import save_risk_state
+    save_risk_state(user["id"], 0, state.risk_manager._daily_start_balance, False)
+    # 若 Bot 线程不再运行，调用 resume_bot 重启
+    if not state.is_running:
+        result = bot_mgr.resume_bot(user["id"], user["username"])
+        return {"status": "resumed_and_restarted", **result}
     return {"status": "resumed"}

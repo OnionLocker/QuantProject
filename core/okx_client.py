@@ -1,16 +1,18 @@
+"""
+core/okx_client.py - OKX 交易所工具函数
+
+提供：
+  - retry_on_network_error: 网络请求指数退避重试装饰器
+  - fetch_position_state: 读取交易所持仓快照（用于启动同步）
+
+注意：多用户版使用 api.routes.keys.get_user_exchange() 获取每用户独立实例，
+     本文件不再维护全局 exchange 单例。
+"""
 import ccxt
-import os
 import time
 import functools
-from dotenv import load_dotenv
 from utils.logger import bot_logger
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
-env_path = os.path.join(project_root, ".env")
-load_dotenv(env_path)
-
-_exchange = None
 
 # ── 指数退避重试装饰器 ──────────────────────────────────────────────────────
 def retry_on_network_error(max_retries=3, base_delay=2.0):
@@ -37,55 +39,19 @@ def retry_on_network_error(max_retries=3, base_delay=2.0):
     return decorator
 
 
-def get_exchange():
-    global _exchange
-    if _exchange is not None:
-        return _exchange
-
-    sim_api_key = os.getenv("SIMULATE_OKX_API_KEY")
-    sim_secret_key = os.getenv("SIMULATE_OKX_SECRET_KEY")
-    sim_password = os.getenv("SIMULATE_OKX_PASSPHRASE")
-
-    is_simulate = False
-
-    if sim_api_key and sim_secret_key and sim_password:
-        api_key = sim_api_key
-        secret_key = sim_secret_key
-        password = sim_password
-        is_simulate = True
-        bot_logger.info("⚠️ 检测到 SIMULATE 配置，当前连接：【OKX 模拟盘】")
-    else:
-        api_key = os.getenv("OKX_API_KEY")
-        secret_key = os.getenv("OKX_SECRET_KEY")
-        password = os.getenv("OKX_PASSPHRASE")
-        bot_logger.info("🔥 未检测到 SIMULATE 配置，当前连接：【OKX 真实实盘】！")
-
-    if not api_key or not secret_key or not password:
-        raise ValueError("❌ 找不到有效的 API Key，请检查 .env 文件配置。")
-
-    exchange = ccxt.okx({
-        "apiKey": api_key,
-        "secret": secret_key,
-        "password": password,
-        "enableRateLimit": True,
-    })
-
-    exchange.set_sandbox_mode(is_simulate)
-    _exchange = exchange
-    return _exchange
-
-
 @retry_on_network_error(max_retries=3, base_delay=2.0)
-def fetch_position_state(symbol: str):
+def fetch_position_state(ex, symbol: str):
     """
     读取交易所当前仓位快照（用于"启动同步防失忆"）
+
+    :param ex: ccxt exchange 实例（由调用方传入，支持多用户）
+    :param symbol: 交易对，如 "BTC/USDT:USDT"
     返回 dict:
       - status: 'empty' | 'ok' | 'both' | 'error'
       - side: 'long'/'short'/None
       - amount: 合约张数(contracts)
       - entry_price: 持仓均价
     """
-    ex = get_exchange()
     if not ex.has.get("fetchPositions", False):
         return {"status": "error", "error": "ccxt 当前版本不支持 fetch_positions"}
 

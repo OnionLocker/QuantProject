@@ -11,13 +11,14 @@ api.interceptors.request.use(cfg => {
   return cfg
 })
 
-// 401 自动跳登录
+// 401 自动跳登录（清除 token 后 reload，App.jsx 会自动显示 AuthPage）
 api.interceptors.response.use(
   r => r,
   err => {
     if (err.response?.status === 401) {
       localStorage.removeItem('token')
-      window.location.href = '/login'
+      localStorage.removeItem('username')
+      window.location.reload()
     }
     return Promise.reject(err)
   }

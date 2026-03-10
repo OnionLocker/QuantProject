@@ -1,5 +1,9 @@
 """
-utils/trade_state.py - 单用户持仓状态管理（SQLite 版，供 main.py 使用）
+utils/trade_state.py - 持仓状态管理（SQLite 版）
+
+⚠️ 已弃用：此模块为旧版单用户遗留代码，多用户版使用 core/user_bot/runner.py 中的
+   _load_state/_save_state（基于 user_id 主键），不再使用本模块。
+   保留仅用于向后兼容 legacy JSON 数据迁移。请勿新增引用。
 
 多用户版状态管理在 core/user_bot/runner.py 中内联实现，不使用本模块。
 避免循环导入：本模块直接使用 sqlite3 + DB_PATH，不导入 db_handler 中的函数。
@@ -45,8 +49,17 @@ def _migrate_legacy():
         print(f"⚠️ 迁移 trade_state.json 失败（将继续使用 SQLite 空状态）: {e}")
 
 
-_init_state_table()
-_migrate_legacy()
+_initialized = False
+
+
+def _ensure_initialized():
+    """延迟初始化：首次调用 load/save 时才建表和迁移，避免 import 时副作用。"""
+    global _initialized
+    if _initialized:
+        return
+    _init_state_table()
+    _migrate_legacy()
+    _initialized = True
 
 
 def get_empty_state() -> dict:
@@ -74,6 +87,7 @@ def get_empty_state() -> dict:
 
 def load_state() -> dict:
     """从 SQLite 读取持仓状态；若无记录则返回空状态"""
+    _ensure_initialized()
     try:
         conn = sqlite3.connect(DB_PATH)
         row = conn.execute(
@@ -94,6 +108,7 @@ def load_state() -> dict:
 
 def save_state(state: dict):
     """原子化写入持仓状态到 SQLite"""
+    _ensure_initialized()
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute(

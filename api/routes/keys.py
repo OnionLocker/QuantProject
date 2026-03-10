@@ -21,50 +21,45 @@ class ApiKeyBody(BaseModel):
 def save_keys(body: ApiKeyBody, user=Depends(get_current_user)):
     uid = user["id"]
     conn = get_conn()
-    try:
-        existing = conn.execute(
-            "SELECT api_key_enc, secret_enc, passphrase_enc FROM user_api_keys WHERE user_id=?",
-            (uid,)
-        ).fetchone()
+    existing = conn.execute(
+        "SELECT api_key_enc, secret_enc, passphrase_enc FROM user_api_keys WHERE user_id=?",
+        (uid,)
+    ).fetchone()
 
-        def _enc_or_keep(field_key: str, body_val: str) -> str:
-            if (body_val or "").strip():
-                return encrypt((body_val or "").strip())
-            if existing and (existing[field_key] or "").strip():
-                return existing[field_key]
-            return ""
+    def _enc_or_keep(field_key: str, body_val: str) -> str:
+        if (body_val or "").strip():
+            return encrypt((body_val or "").strip())
+        if existing and (existing[field_key] or "").strip():
+            return existing[field_key]
+        return ""
 
-        api_key_enc    = _enc_or_keep("api_key_enc", body.api_key)
-        secret_enc     = _enc_or_keep("secret_enc", body.secret)
-        passphrase_enc = _enc_or_keep("passphrase_enc", body.passphrase)
+    api_key_enc    = _enc_or_keep("api_key_enc", body.api_key)
+    secret_enc     = _enc_or_keep("secret_enc", body.secret)
+    passphrase_enc = _enc_or_keep("passphrase_enc", body.passphrase)
 
-        if not api_key_enc or not secret_enc or not passphrase_enc:
-            raise HTTPException(
-                status_code=400,
-                detail="请完整填写 API Key、Secret Key 和 Passphrase（留空仅在不修改时使用）"
-            )
+    if not api_key_enc or not secret_enc or not passphrase_enc:
+        raise HTTPException(
+            status_code=400,
+            detail="请完整填写 API Key、Secret Key 和 Passphrase（留空仅在不修改时使用）"
+        )
 
-        conn.execute('''
-            INSERT OR REPLACE INTO user_api_keys
-              (user_id, api_key_enc, secret_enc, passphrase_enc, is_simulate, updated_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-        ''', (uid, api_key_enc, secret_enc, passphrase_enc, int(body.is_simulate)))
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute('''
+        INSERT OR REPLACE INTO user_api_keys
+          (user_id, api_key_enc, secret_enc, passphrase_enc, is_simulate, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+    ''', (uid, api_key_enc, secret_enc, passphrase_enc, int(body.is_simulate)))
+    conn.commit()
+    invalidate_user_exchange_cache(uid)
     return {"status": "saved"}
 
 
 @router.get("/status", summary="检查是否已配置 API Key")
 def key_status(user=Depends(get_current_user)):
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT is_simulate, updated_at FROM user_api_keys WHERE user_id=?",
-            (user["id"],)
-        ).fetchone()
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT is_simulate, updated_at FROM user_api_keys WHERE user_id=?",
+        (user["id"],)
+    ).fetchone()
     if not row:
         return {"configured": False}
     return {
@@ -80,13 +75,10 @@ def validate_key(user=Depends(get_current_user)):
     import ccxt
     uid = user["id"]
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT api_key_enc, secret_enc, passphrase_enc, is_simulate FROM user_api_keys WHERE user_id=?",
-            (uid,)
-        ).fetchone()
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT api_key_enc, secret_enc, passphrase_enc, is_simulate FROM user_api_keys WHERE user_id=?",
+        (uid,)
+    ).fetchone()
     if not row:
         raise HTTPException(status_code=400, detail="请先配置 API Key")
 
@@ -175,27 +167,48 @@ def live_balance(user=Depends(get_current_user)):
 @router.delete("/reset", summary="清除 OKX API Key 配置")
 def reset_keys(user=Depends(get_current_user)):
     conn = get_conn()
-    try:
-        conn.execute("DELETE FROM user_api_keys WHERE user_id=?", (user["id"],))
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute("DELETE FROM user_api_keys WHERE user_id=?", (user["id"],))
+    conn.commit()
+    invalidate_user_exchange_cache(user["id"])
     return {"status": "cleared"}
 
 
+# ── per-user ccxt 实例缓存（TTL 300 秒，避免每次请求都新建）─────────────────
+import time as _time
+import threading as _threading
+
+_exchange_cache: dict = {}   # user_id -> {"ex": ccxt_instance, "ts": float}
+_exchange_cache_lock = _threading.Lock()
+_EXCHANGE_CACHE_TTL = 300    # 5 分钟后重建（API Key 更新时也会因 TTL 自然刷新）
+
+
+def invalidate_user_exchange_cache(user_id: int):
+    """用户更新 API Key 后调用，立即使缓存失效。"""
+    with _exchange_cache_lock:
+        _exchange_cache.pop(user_id, None)
+
+
 def get_user_exchange(user_id: int):
-    """根据用户 ID 从数据库取出 API Key，构建 ccxt OKX 实例（不缓存，每次新建）"""
+    """
+    根据用户 ID 从数据库取出 API Key，构建 ccxt OKX 实例。
+    使用 per-user TTL 缓存复用实例，避免频繁创建 + 交易所限频风险。
+    """
     import ccxt
+
+    now = _time.time()
+    with _exchange_cache_lock:
+        cached = _exchange_cache.get(user_id)
+        if cached and (now - cached["ts"]) < _EXCHANGE_CACHE_TTL:
+            return cached["ex"]
+
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT api_key_enc, secret_enc, passphrase_enc, is_simulate FROM user_api_keys WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT api_key_enc, secret_enc, passphrase_enc, is_simulate FROM user_api_keys WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
     if not row:
         raise HTTPException(status_code=400, detail="请先配置 OKX API Key")
+
     ex = ccxt.okx({
         "apiKey":    decrypt(row["api_key_enc"]),
         "secret":    decrypt(row["secret_enc"]),
@@ -203,4 +216,8 @@ def get_user_exchange(user_id: int):
         "enableRateLimit": True,
     })
     ex.set_sandbox_mode(bool(row["is_simulate"]))
+
+    with _exchange_cache_lock:
+        _exchange_cache[user_id] = {"ex": ex, "ts": now}
+
     return ex
