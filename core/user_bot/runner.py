@@ -417,10 +417,11 @@ def _classify_error(e: Exception) -> str:
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
 
-def run_user_bot(bot_state):
+def run_user_bot(bot_state, override_strategy: str = None):
     """
     :param bot_state: UserBotState 实例
                       属性：user_id, username, risk_manager, stop_event
+    :param override_strategy: 启动时临时覆盖策略名（不保存到 DB），None 则用用户配置
     """
     user_id  = bot_state.user_id
     username = bot_state.username
@@ -433,6 +434,10 @@ def run_user_bot(bot_state):
 
     # ── 加载有效配置（DB 优先，fallback 到 config.yaml）──────────────────────
     cfg = _resolve_config(user_id)
+
+    # 启动时临时覆盖策略（优先级最高，不写入 DB）
+    if override_strategy:
+        cfg["strategy_name"] = override_strategy.upper()
 
     SYMBOL        = cfg["symbol"]
     TIMEFRAME     = cfg["timeframe"]

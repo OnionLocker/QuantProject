@@ -3,6 +3,8 @@ api/routes/bot.py - Bot 启停 / 状态 / 风控
 """
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional
 from api.auth.jwt_handler import get_current_user
 from core.user_bot import manager as bot_mgr
 from utils.trade_state import load_state  # 兼容单用户版（多用户用 _load_state）
@@ -11,6 +13,10 @@ from execution.db_handler import DB_PATH
 import sqlite3
 
 router = APIRouter(prefix="/api/bot", tags=["bot"])
+
+
+class StartBotBody(BaseModel):
+    strategy_name: Optional[str] = None
 
 
 def _load_user_state(user_id: int) -> dict:
@@ -23,8 +29,9 @@ def _load_user_state(user_id: int) -> dict:
 
 
 @router.post("/start", summary="启动我的 Bot")
-def start(user=Depends(get_current_user)):
-    result = bot_mgr.start_bot(user["id"], user["username"])
+def start(body: StartBotBody = StartBotBody(), user=Depends(get_current_user)):
+    result = bot_mgr.start_bot(user["id"], user["username"],
+                               strategy_name=body.strategy_name or None)
     return result
 
 

@@ -1,16 +1,21 @@
 import { useState, useEffect, useRef } from 'react'
-import { botApi } from '../api'
+import { botApi, dataApi } from '../api'
 import {
   Play, Square, Zap, TrendingUp, TrendingDown,
   Minus, AlertTriangle, RefreshCw, Clock, Activity,
   DollarSign, BarChart2, ArrowUpRight, ArrowDownRight,
+  ChevronDown,
 } from 'lucide-react'
 
 export default function Dashboard({ username }) {
-  const [status,  setStatus]  = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [wsData,  setWsData]  = useState(null)
-  const [wsOk,    setWsOk]    = useState(false)
+  const [status,     setStatus]     = useState(null)
+  const [loading,    setLoading]    = useState(false)
+  const [wsData,     setWsData]     = useState(null)
+  const [wsOk,       setWsOk]       = useState(false)
+  const [strategies, setStrategies] = useState([])
+  const [selStrategy, setSelStrategy] = useState('AUTO')
+  const [showStratMenu, setShowStratMenu] = useState(false)
+  const stratMenuRef = useRef(null)
   const wsRef = useRef(null)
 
   const fetchStatus = async () => {
@@ -18,6 +23,9 @@ export default function Dashboard({ username }) {
   }
 
   useEffect(() => {
+    // 拉取策略列表
+    dataApi.strategies().then(r => setStrategies(r.data || [])).catch(() => {})
+
     fetchStatus()
     const t = setInterval(fetchStatus, 15000)
 
@@ -35,9 +43,24 @@ export default function Dashboard({ username }) {
     return () => { clearInterval(t); ws.close() }
   }, [])
 
+  // 点击外部关闭策略菜单
+  useEffect(() => {
+    const handler = (e) => {
+      if (stratMenuRef.current && !stratMenuRef.current.contains(e.target)) {
+        setShowStratMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
   const handleStart = async () => {
     setLoading(true)
-    try { await botApi.start(); await fetchStatus() } finally { setLoading(false) }
+    try {
+      // AUTO 传 null（使用用户配置），其他策略传策略名覆盖
+      await botApi.start(selStrategy === 'AUTO' ? null : selStrategy)
+      await fetchStatus()
+    } finally { setLoading(false) }
   }
   const handleStop = async () => {
     setLoading(true)
@@ -95,7 +118,7 @@ export default function Dashboard({ username }) {
             </span>
           </div>
         </div>
-        <div className="flex gap-8">
+        <div className="flex gap-8" style={{ alignItems: 'center' }}>
           {fused && (
             <button className="btn-warning btn-sm" onClick={handleResume} disabled={loading}>
               <Zap size={12} style={{ marginRight:4 }} />恢复熔断
@@ -108,9 +131,87 @@ export default function Dashboard({ username }) {
             ? <button className="btn-danger btn-sm" onClick={handleStop} disabled={loading}>
                 {loading ? <span className="spinner" /> : <><Square size={12} style={{marginRight:4}}/>停止 Bot</>}
               </button>
-            : <button className="btn-success btn-sm" onClick={handleStart} disabled={loading}>
-                {loading ? <span className="spinner" /> : <><Play size={12} style={{marginRight:4}}/>启动 Bot</>}
-              </button>
+            : (
+              <div style={{ display:'flex', gap:0, alignItems:'center' }}>
+                {/* 策略选择下拉 */}
+                <div ref={stratMenuRef} style={{ position:'relative' }}>
+                  <button
+                    className="btn-ghost btn-sm"
+                    style={{
+                      borderRight: '1px solid var(--border)',
+                      borderRadius: '6px 0 0 6px',
+                      paddingRight: 8,
+                      display: 'flex', alignItems: 'center', gap: 4,
+                      fontSize: 12,
+                      minWidth: 90,
+                    }}
+                    onClick={() => setShowStratMenu(v => !v)}
+                    disabled={loading}
+                  >
+                    {selStrategy === 'AUTO'
+                      ? <><Zap size={11} style={{color:'var(--yellow)'}}/> AUTO</>
+                      : selStrategy}
+                    <ChevronDown size={11} />
+                  </button>
+                  {showStratMenu && (
+                    <div style={{
+                      position: 'absolute', top: '100%', left: 0, zIndex: 100,
+                      background: 'var(--surface2)', border: '1px solid var(--border)',
+                      borderRadius: 6, minWidth: 160, marginTop: 4,
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+                      overflow: 'hidden',
+                    }}>
+                      {/* AUTO 选项 */}
+                      <div
+                        onClick={() => { setSelStrategy('AUTO'); setShowStratMenu(false) }}
+                        style={{
+                          padding: '8px 14px', cursor: 'pointer', fontSize: 13,
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          background: selStrategy === 'AUTO' ? 'var(--surface3)' : 'transparent',
+                          borderBottom: '1px solid var(--border)',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.background = 'var(--surface3)'}
+                        onMouseLeave={e => e.currentTarget.style.background = selStrategy === 'AUTO' ? 'var(--surface3)' : 'transparent'}
+                      >
+                        <Zap size={12} style={{color:'var(--yellow)'}} />
+                        <div>
+                          <div style={{ fontWeight: 600 }}>AUTO</div>
+                          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 1 }}>AI 智能策略切换</div>
+                        </div>
+                      </div>
+                      {/* 各策略选项 */}
+                      {strategies.map(s => (
+                        <div
+                          key={s.name}
+                          onClick={() => { setSelStrategy(s.name); setShowStratMenu(false) }}
+                          style={{
+                            padding: '8px 14px', cursor: 'pointer', fontSize: 13,
+                            display: 'flex', alignItems: 'center', gap: 8,
+                            background: selStrategy === s.name ? 'var(--surface3)' : 'transparent',
+                          }}
+                          onMouseEnter={e => e.currentTarget.style.background = 'var(--surface3)'}
+                          onMouseLeave={e => e.currentTarget.style.background = selStrategy === s.name ? 'var(--surface3)' : 'transparent'}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 600 }}>{s.name}</div>
+                            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 1 }}>{s.class}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {/* 启动按钮 */}
+                <button
+                  className="btn-success btn-sm"
+                  style={{ borderRadius: '0 6px 6px 0' }}
+                  onClick={handleStart}
+                  disabled={loading}
+                >
+                  {loading ? <span className="spinner" /> : <><Play size={12} style={{marginRight:4}}/>启动 Bot</>}
+                </button>
+              </div>
+            )
           }
         </div>
       </div>

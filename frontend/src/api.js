@@ -43,7 +43,7 @@ export const keysApi = {
 }
 
 export const botApi = {
-  start:  () => api.post('/api/bot/start'),
+  start:  (strategyName) => api.post('/api/bot/start', strategyName ? { strategy_name: strategyName } : {}),
   stop:   () => api.post('/api/bot/stop'),
   status: () => api.get('/api/bot/status'),
   resume: () => api.post('/api/bot/risk/resume'),

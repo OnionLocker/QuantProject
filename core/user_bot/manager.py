@@ -61,7 +61,7 @@ def get_bot(user_id: int) -> Optional[UserBotState]:
     return _bots.get(user_id)
 
 
-def start_bot(user_id: int, username: str) -> dict:
+def start_bot(user_id: int, username: str, strategy_name: str = None) -> dict:
     state = get_or_create(user_id, username)
     if state.is_running:
         return {"status": "already_running"}
@@ -73,7 +73,7 @@ def start_bot(user_id: int, username: str) -> dict:
     def _run():
         from core.user_bot.runner import run_user_bot
         try:
-            run_user_bot(state)
+            run_user_bot(state, override_strategy=strategy_name)
         except Exception as e:
             state.last_error = str(e)
             bot_logger.error(f"[User:{username}] Bot 异常退出: {e}")
@@ -81,7 +81,7 @@ def start_bot(user_id: int, username: str) -> dict:
     state.thread    = threading.Thread(target=_run, daemon=True, name=f"Bot-{username}")
     state.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     state.thread.start()
-    bot_logger.info(f"[Manager] Bot[{username}] 已启动")
+    bot_logger.info(f"[Manager] Bot[{username}] 已启动" + (f"，策略覆盖={strategy_name}" if strategy_name else ""))
     return {"status": "started"}
 
 

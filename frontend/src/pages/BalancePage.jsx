@@ -94,23 +94,25 @@ export default function BalancePage() {
         ) : (
           <div style={{ display:'flex', gap:24, flexWrap:'wrap', padding:'4px 0 8px' }}>
             <div>
-              <div className="s-label">总余额</div>
+              <div className="s-label">账户总资产</div>
               <div className="s-value" style={{ fontSize:22 }}>
                 {liveLoading ? '—' : `$${(live?.total ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
               </div>
-              <div className="s-sub">USDT</div>
+              <div className="s-sub">USDT（可用 + 持仓保证金）</div>
             </div>
             <div>
-              <div className="s-label">可用</div>
+              <div className="s-label">可用余额</div>
               <div style={{ fontSize:16, fontWeight:600, color:'var(--green)', marginTop:4 }}>
                 {liveLoading ? '—' : `$${(live?.free ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
               </div>
+              <div className="s-sub">可开新仓</div>
             </div>
             <div>
-              <div className="s-label">占用（保证金）</div>
-              <div style={{ fontSize:16, fontWeight:600, color:'var(--red)', marginTop:4 }}>
+              <div className="s-label">持仓保证金</div>
+              <div style={{ fontSize:16, fontWeight:600, color:'var(--muted)', marginTop:4 }}>
                 {liveLoading ? '—' : `$${(live?.used ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
               </div>
+              <div className="s-sub">已锁定（开仓中）</div>
             </div>
           </div>
         )}
