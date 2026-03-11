@@ -341,8 +341,8 @@ QuantProject/
 |------|------|------|
 | POST | `/api/keys/save` | 保存 API Key（Fernet 加密入库） |
 | GET | `/api/keys/status` | 检查是否已配置 + 模拟盘/实盘标记 |
-| GET | `/api/keys/validate` | 验证 API Key 有效性（调交易所） |
-| GET | `/api/keys/live-balance` | 实时拉取 OKX 余额（swap > spot fallback） |
+| GET | `/api/keys/validate` | 验证 API Key 有效性（优先用当前模式，必要时探测另一模式） |
+| GET | `/api/keys/live-balance` | 实时拉取 OKX 资产（优先 OKX 原始账户接口 totalEq，其次回退 ccxt balance） |
 | DELETE | `/api/keys/reset` | 清除 API Key |
 
 ### 5.3 Bot 控制
@@ -636,6 +636,29 @@ sqlite3.OperationalError: database is locked
 - 确认 `busy_timeout`：所有连接都通过 `db_handler.get_conn()` 创建（自带 5s timeout）
 - 确认单 worker：`uvicorn --workers 1`（多 worker 写同一 SQLite 会锁死）
 
+### 11.4 旧库结构兼容问题
+
+如果看到类似：
+
+```python
+sqlite3.OperationalError: no such column: user_id
+sqlite3.OperationalError: no such column: timestamp
+```
+
+通常说明数据库已经处于“新旧结构混合态”：
+- `daily_balance` 可能是旧单用户结构
+- `trade_history` 可能已经升级为新多用户结构
+- 代码若仍按旧字段查询，会导致页面局部加载失败
+
+当前项目已对以下接口做兼容处理：
+- `/api/data/trades`
+- `/api/data/balance`
+
+运维建议：
+- 优先让 `execution/db_handler.py` 的 migration 成为唯一 schema 来源
+- 不要长期依赖手工补列；手工修复后应同步整理 migration
+- 如果要切换模拟盘/实盘，最好使用不同账号，避免历史记录混杂
+
 ### 11.4 Watchdog 自动重启
 
 - Watchdog 线程首次 `start_bot()` 时启动，60 秒轮询
@@ -709,6 +732,24 @@ runner.py 内置网络错误分类（`_classify_error`）：
 ```
 用户 TG 配置 → 全局 .env TG → 空操作（日志记录，不崩溃）
 ```
+
+### 13.4 OKX 资产口径说明（重要）
+
+前端“OKX 实时余额”当前优先采用 **OKX 原始账户接口** 的 `totalEq` 作为“账户总资产”显示口径，而不是单纯的 `USDT.total`。
+
+这样做的原因：
+- `ccxt.fetch_balance()` 在 OKX 模拟盘环境下可能出现异常返回（例如 `TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'`）
+- 单纯使用 `USDT total/free/used` 会低估账户页面展示的总资产
+- `totalEq` 更接近 OKX 网页端“总权益 / 总资产”的显示逻辑
+
+当前返回字段含义：
+- `total`：优先取 `totalEq`（更接近 OKX 页面总资产）
+- `free`：优先取 USDT 明细中的 `availBal`
+- `used`：近似按 `total - free` 计算，用于前端展示“占用/保证金”概念
+
+注意：
+- `used` 是展示近似值，不一定与 OKX 页面每个子账户拆分值严格一致
+- 若要做严谨风控或对账，请优先使用 OKX 原始字段而不是前端展示聚合值
 
 ---
 
