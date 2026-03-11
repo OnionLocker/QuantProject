@@ -26,13 +26,36 @@ _backtest_running: dict = {}   # user_id -> bool
 @router.get("/trades", summary="我的历史交易")
 def get_trades(limit: int = 50, user=Depends(get_current_user)):
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT id,timestamp,symbol,side,action,price,amount,pnl,reason "
-        "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
-        (user["id"], limit)
-    ).fetchall()
-    keys = ["id", "timestamp", "symbol", "side", "action", "price", "amount", "pnl", "reason"]
-    return [dict(zip(keys, r)) for r in rows]
+    try:
+        # 新版表结构：entry/exit 模型
+        rows = conn.execute(
+            "SELECT id, entry_time, symbol, side, status, entry_price, amount, pnl, fee "
+            "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (user["id"], limit)
+        ).fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                "id": r[0],
+                "timestamp": r[1],
+                "symbol": r[2],
+                "side": r[3],
+                "action": r[4],
+                "price": r[5],
+                "amount": r[6],
+                "pnl": r[7],
+                "reason": f"fee={r[8]}" if r[8] is not None else "",
+            })
+        return result
+    except Exception:
+        # 兼容旧版表结构
+        rows = conn.execute(
+            "SELECT id,timestamp,symbol,side,action,price,amount,pnl,reason "
+            "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (user["id"], limit)
+        ).fetchall()
+        keys = ["id", "timestamp", "symbol", "side", "action", "price", "amount", "pnl", "reason"]
+        return [dict(zip(keys, r)) for r in rows]
 
 
 @router.get("/balance", summary="我的每日余额历史")
