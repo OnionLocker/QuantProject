@@ -253,6 +253,46 @@ def _detect_pos_mode(ex) -> str:
         return "net"
 
 
+def _symbol_to_okx_inst_id(symbol: str) -> str:
+    s = (symbol or '').upper()
+    if ':' in s:
+        s = s.split(':', 1)[0]
+    s = s.replace('/', '-')
+    if not s.endswith('-SWAP'):
+        s = s + '-SWAP'
+    return s
+
+
+def _timeframe_to_okx_bar(tf: str) -> str:
+    mp = {
+        '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+        '1h': '1H', '2h': '2H', '4h': '4H', '6h': '6H', '12h': '12H',
+        '1d': '1D', '1w': '1W'
+    }
+    return mp.get((tf or '1h').lower(), '1H')
+
+
+def _fetch_ohlcv_safe(ex, symbol: str, timeframe: str, limit: int = 200):
+    """优先 ccxt.fetch_ohlcv；若 demo 环境异常，则回退 OKX 原始 K 线接口。"""
+    try:
+        return ex.fetch_ohlcv(symbol, timeframe, limit=limit)
+    except Exception:
+        try:
+            inst_id = _symbol_to_okx_inst_id(symbol)
+            bar = _timeframe_to_okx_bar(timeframe)
+            resp = ex.publicGetMarketCandles({'instId': inst_id, 'bar': bar, 'limit': str(limit)})
+            data = (resp or {}).get('data') or []
+            # OKX: [ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]
+            rows = []
+            for r in reversed(data):
+                rows.append([
+                    int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])
+                ])
+            return rows
+        except Exception:
+            raise
+
+
 def _place_algo(ex, symbol: str, side: str, amount: float,
                 trigger_price: float, pos_side: str,
                 algo_type: str, margin_mode: str = "cross") -> dict | None:
@@ -887,7 +927,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
             # ── K 线 & 信号 ──────────────────────────────────────────────────
             # Fix: limit 动态适配策略预热期，确保实盘信号窗口与回测一致
             kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
-            ohlcv = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=kline_limit)
+            ohlcv = _fetch_ohlcv_safe(ex, SYMBOL, TIMEFRAME, limit=kline_limit)
             df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
             df.set_index("timestamp", inplace=True)
@@ -911,7 +951,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     strategy = new_strategy
                     # 新策略可能需要更多K线，重新拉取
                     kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
-                    ohlcv = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=kline_limit)
+                    ohlcv = _fetch_ohlcv_safe(ex, SYMBOL, TIMEFRAME, limit=kline_limit)
                     df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
                     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
                     df.set_index("timestamp", inplace=True)
