@@ -241,7 +241,11 @@ def _get_swap_usdt(ex) -> float:
 
 def _detect_pos_mode(ex) -> str:
     try:
-        cfg = ex.private_get_account_config()
+        # 优先走 OKX 原始接口（ccxt snake_case/camelCase 兼容不一致时更稳）
+        if hasattr(ex, 'privateGetAccountConfig'):
+            cfg = ex.privateGetAccountConfig()
+        else:
+            cfg = ex.private_get_account_config()
         data = (cfg or {}).get("data") or []
         mode = (data[0] or {}).get("posMode", "")
         return "hedge" if mode == "long_short_mode" else "net"
@@ -295,7 +299,7 @@ def _cancel_all_algo(ex, symbol: str, logger=None, notify=None, tag: str = ""):
                 pass
 
 
-def _live_position_amount(ex, symbol: str) -> float:
+def _live_position_amount(ex, symbol: str, logger=None, tag: str = "") -> float:
     """
     查询交易所当前持仓合约张数。
     返回 >=0 表示实际持仓，-1 表示查询失败（不能误判为空仓）。
@@ -307,7 +311,9 @@ def _live_position_amount(ex, symbol: str) -> float:
             for p in positions
             if p.get("symbol") == symbol and float(p.get("contracts") or 0) > 0
         )
-    except Exception:
+    except Exception as e:
+        if logger:
+            logger.warning(f"{tag} 持仓查询异常: {e}")
         return -1.0
 
 
@@ -804,7 +810,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
             # ── 仓位核对（检测被动平仓）──────────────────────────────────────
             if state["position_amount"] > 0:
-                live_amt = _live_position_amount(ex, SYMBOL)
+                live_amt = _live_position_amount(ex, SYMBOL, logger=logger, tag=tag)
 
                 if live_amt == -1.0:
                     # 查询失败，累计计数并按需告警
