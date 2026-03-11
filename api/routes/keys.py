@@ -95,20 +95,38 @@ def validate_key(user=Depends(get_current_user)):
         ex.set_sandbox_mode(sandbox)
         return ex
 
-    # 先用当前配置验证
-    ex = _build(is_simulate)
-    try:
-        ex.fetch_balance()
-        return {"valid": True, "message": "API Key 有效"}
-    except ccxt.AuthenticationError:
-        pass
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"验证请求失败：{e}")
+    def _probe(ex):
+        # 先尝试最常规余额接口；若 OKX/ccxt 在某些环境下返回异常，再降级试账户配置
+        try:
+            ex.fetch_balance({"type": "swap"})
+            return True, None
+        except ccxt.AuthenticationError as e:
+            return False, e
+        except Exception as e:
+            msg = str(e)
+            # 某些模拟盘环境 fetch_balance 会因 ccxt/返回结构问题抛 TypeError，但认证其实已通过
+            if 'NoneType' in msg and '+' in msg:
+                try:
+                    ex.fetch_accounts()
+                    return True, None
+                except ccxt.AuthenticationError as e2:
+                    return False, e2
+                except Exception as e2:
+                    return False, e2
+            try:
+                ex.fetch_accounts()
+                return True, None
+            except ccxt.AuthenticationError as e2:
+                return False, e2
+            except Exception as e2:
+                return False, e2
 
-    # 当前模式认证失败：尝试另一模式，用于提示用户是否选错模拟盘/实盘
-    ex_other = _build(not is_simulate)
-    try:
-        ex_other.fetch_balance()
+    ok, err = _probe(_build(is_simulate))
+    if ok:
+        return {"valid": True, "message": "API Key 有效"}
+
+    ok_other, err_other = _probe(_build(not is_simulate))
+    if ok_other:
         if is_simulate:
             raise HTTPException(
                 status_code=400,
@@ -119,54 +137,83 @@ def validate_key(user=Depends(get_current_user)):
                 status_code=400,
                 detail="当前未勾选「使用模拟盘」，但您的 Key 属于模拟盘。请在设置中勾选「使用模拟盘」后保存再试。"
             )
-    except HTTPException:
-        raise
-    except ccxt.AuthenticationError as e:
-        raise HTTPException(status_code=400, detail=f"API Key 认证失败（模拟盘/实盘均失败）：{e}")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"验证请求失败：{e}")
+
+    raise HTTPException(status_code=400, detail=f"API Key 验证失败：{err}")
 
 
 @router.get("/live-balance", summary="从 OKX 实时拉取账户余额")
 def live_balance(user=Depends(get_current_user)):
-    """直接调用 OKX 接口获取最新 USDT 余额，不依赖数据库历史记录。
-    优先读合约账户（swap），fallback 现货账户。
+    """直接调用 OKX 接口获取最新资产。
+    优先使用 OKX 原始账户接口获取总权益（更接近网页显示口径），失败时再回退到 ccxt balance。
     """
     import ccxt
     ex = get_user_exchange(user["id"])
-    try:
-        # OKX 合约账户余额（永续合约用这个）
-        bal = ex.fetch_balance({"type": "swap"})
-        usdt = bal.get("USDT", {})
-        total = usdt.get("total") or 0
-        free  = usdt.get("free")  or 0
-        used  = usdt.get("used")  or 0
 
-        # 合约账户余额为0时，尝试现货账户（可能用户只充值了现货）
+    def _f(v):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+    # 1) 优先走 OKX 原始账户接口，拿总权益/可用/占用，更贴近 OKX 页面口径
+    try:
+        raw = ex.privateGetAccountBalance()
+        data = (raw or {}).get('data') or []
+        if data:
+            d0 = data[0] or {}
+            total = _f(d0.get('totalEq') or d0.get('adjEq') or d0.get('isoEq'))
+            details = d0.get('details') or []
+            usdt_detail = None
+            for item in details:
+                if (item or {}).get('ccy') == 'USDT':
+                    usdt_detail = item
+                    break
+            free = _f((usdt_detail or {}).get('availBal'))
+            # 占用 = 总权益 - 可用（近似口径；比单纯 used 更接近页面“总资产”）
+            used = max(total - free, 0.0)
+            return {
+                'total': round(total, 4),
+                'free': round(free, 4),
+                'used': round(used, 4),
+                'account_type': 'okx_total_equity',
+            }
+    except ccxt.AuthenticationError:
+        raise HTTPException(status_code=400, detail='OKX 认证失败：请检查 API Key / Secret / Passphrase，以及模拟盘开关是否正确')
+    except ccxt.NetworkError as e:
+        raise HTTPException(status_code=502, detail=f'连接 OKX 失败：{e}')
+    except Exception:
+        pass
+
+    # 2) 回退到 ccxt balance（兼容旧逻辑）
+    try:
+        bal = ex.fetch_balance({'type': 'swap'})
+        usdt = bal.get('USDT', {})
+        total = usdt.get('total') or 0
+        free  = usdt.get('free')  or 0
+        used  = usdt.get('used')  or 0
         if total == 0:
-            bal_spot = ex.fetch_balance({"type": "spot"})
-            usdt_spot = bal_spot.get("USDT", {})
-            spot_total = usdt_spot.get("total") or 0
+            bal_spot = ex.fetch_balance({'type': 'spot'})
+            usdt_spot = bal_spot.get('USDT', {})
+            spot_total = usdt_spot.get('total') or 0
             if spot_total > 0:
                 return {
-                    "total":        round(float(spot_total), 4),
-                    "free":         round(float(usdt_spot.get("free") or 0), 4),
-                    "used":         round(float(usdt_spot.get("used") or 0), 4),
-                    "account_type": "spot",
+                    'total': round(float(spot_total), 4),
+                    'free': round(float(usdt_spot.get('free') or 0), 4),
+                    'used': round(float(usdt_spot.get('used') or 0), 4),
+                    'account_type': 'spot',
                 }
-
         return {
-            "total":        round(float(total), 4),
-            "free":         round(float(free),  4),
-            "used":         round(float(used),  4),
-            "account_type": "swap",
+            'total': round(float(total), 4),
+            'free': round(float(free), 4),
+            'used': round(float(used), 4),
+            'account_type': 'swap',
         }
     except ccxt.AuthenticationError:
-        raise HTTPException(status_code=400, detail="OKX 认证失败：请检查 API Key / Secret / Passphrase，以及模拟盘开关是否正确")
+        raise HTTPException(status_code=400, detail='OKX 认证失败：请检查 API Key / Secret / Passphrase，以及模拟盘开关是否正确')
     except ccxt.NetworkError as e:
-        raise HTTPException(status_code=502, detail=f"连接 OKX 失败：{e}")
+        raise HTTPException(status_code=502, detail=f'连接 OKX 失败：{e}')
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"获取余额失败：{e}")
+        raise HTTPException(status_code=502, detail=f'获取余额失败：{e}')
 
 
 @router.delete("/reset", summary="清除 OKX API Key 配置")
