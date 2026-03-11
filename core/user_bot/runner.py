@@ -196,6 +196,34 @@ def _resolve_config(user_id: int) -> dict:
 # ── OKX 工具函数（per-user exchange 实例）───────────────────────────────────
 
 def _get_swap_usdt(ex) -> float:
+    """获取可用 USDT。
+    优先走 OKX 原始账户接口，避免模拟盘下 ccxt.fetch_balance() 的异常结构问题。
+    """
+    def _f(v):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+    # 1) 优先走 OKX 原始账户接口
+    try:
+        raw = ex.privateGetAccountBalance()
+        data = (raw or {}).get('data') or []
+        if data:
+            details = (data[0] or {}).get('details') or []
+            for item in details:
+                if (item or {}).get('ccy') == 'USDT':
+                    v = _f((item or {}).get('availBal'))
+                    if v > 0:
+                        return v
+                    # 退一步取 eq / cashBal
+                    v = _f((item or {}).get('eq')) or _f((item or {}).get('cashBal'))
+                    if v > 0:
+                        return v
+    except Exception:
+        pass
+
+    # 2) 回退到 ccxt balance
     for acc_type in ("swap", "trading", "future"):
         try:
             bal = ex.fetch_balance(params={"type": acc_type})
