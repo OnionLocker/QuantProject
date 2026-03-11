@@ -109,6 +109,11 @@ def _empty_state() -> dict:
         "has_moved_to_breakeven": False,
         "has_taken_partial_profit": False,
         "exchange_order_ids": {"sl_order": None, "tp_order": None},
+        # V2.5: Trailing Stop 状态
+        "trailing_stop_active": False,
+        "trailing_stop_best_price": 0.0,
+        # V2.5: 时间止损
+        "entry_bar_count": 0,
     }
 
 
@@ -436,6 +441,156 @@ def _classify_error(e: Exception) -> str:
     return 'unknown'
 
 
+# ── V2.5: Trailing Stop 追踪止损 ──────────────────────────────────────────────
+
+def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
+                      entry: float, df, trigger_mult: float,
+                      distance_mult: float, ex, symbol: str,
+                      close_side: str, pos_side_str: str,
+                      logger, notify, tag: str, user_id: int):
+    """
+    V2.5 追踪止损逻辑：
+    1. 盈利达到 ATR * trigger_mult 后激活追踪
+    2. 价格回撤 ATR * distance_mult 时更新 SL 到最优价 - distance
+    
+    修改 state（in-place），不直接平仓，只调整交易所 SL 条件单。
+    """
+    import pandas as pd
+    import numpy as np
+
+    # 计算当前 ATR
+    try:
+        close = df['close']
+        high = df['high']
+        low = df['low']
+        prev_c = close.shift(1)
+        tr = pd.concat([high - low, (high - prev_c).abs(), (low - prev_c).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1/14, adjust=False).mean()
+        current_atr = float(atr.iloc[-2])
+        if current_atr <= 0:
+            return
+    except Exception:
+        return
+
+    # 计算当前盈利（点数）
+    if is_long:
+        profit_points = current_price - entry
+    else:
+        profit_points = entry - current_price
+
+    # 激活条件：盈利 > ATR * trigger
+    trigger_level = current_atr * trigger_mult
+    if profit_points < trigger_level:
+        # 尚未达到激活条件，不追踪
+        state["trailing_stop_active"] = False
+        return
+
+    # 激活追踪
+    if not state.get("trailing_stop_active"):
+        state["trailing_stop_active"] = True
+        state["trailing_stop_best_price"] = current_price
+        logger.info(f"{tag} ✅ Trailing Stop 已激活，盈利={profit_points:.2f} > 触发={trigger_level:.2f}")
+
+    # 更新最优价格
+    best = state.get("trailing_stop_best_price", entry)
+    if is_long:
+        if current_price > best:
+            state["trailing_stop_best_price"] = current_price
+            best = current_price
+    else:
+        if current_price < best:
+            state["trailing_stop_best_price"] = current_price
+            best = current_price
+
+    # 计算新的追踪止损价
+    trail_distance = current_atr * distance_mult
+    if is_long:
+        new_sl = best - trail_distance
+    else:
+        new_sl = best + trail_distance
+
+    # 只上移 SL，不下移（多头 SL 只能往上调，空头 SL 只能往下调）
+    old_sl = state.get("active_sl", 0.0)
+    should_update = False
+    if is_long and new_sl > old_sl:
+        should_update = True
+    elif not is_long and (old_sl == 0 or new_sl < old_sl):
+        should_update = True
+
+    if should_update:
+        try:
+            # 取消旧 SL 条件单，挂新的
+            _cancel_all_algo(ex, symbol, logger=logger)
+
+            sl_ord = _place_algo(
+                ex, symbol, close_side, state["position_amount"],
+                new_sl, pos_side_str, "sl"
+            )
+
+            # 如果还有 TP，也重新挂
+            tp_price = state.get("active_tp1", 0) or state.get("active_tp2", 0)
+            tp_ord = None
+            if tp_price > 0:
+                tp_ord = _place_algo(
+                    ex, symbol, close_side, state["position_amount"],
+                    tp_price, pos_side_str, "tp"
+                )
+
+            state["active_sl"] = new_sl
+            state["exchange_order_ids"] = {
+                "sl_order": sl_ord.get("id") if sl_ord else None,
+                "tp_order": tp_ord.get("id") if tp_ord else None,
+            }
+            logger.info(
+                f"{tag} 📈 Trailing Stop 更新: SL {old_sl:.2f} → {new_sl:.2f} "
+                f"(最优价={best:.2f}, 回撤距离={trail_distance:.2f})"
+            )
+        except Exception as e:
+            logger.warning(f"{tag} Trailing Stop 更新SL失败: {e}")
+
+
+# ── V2.5: 策略绩效追踪 ──────────────────────────────────────────────────────
+
+def _record_strategy_performance(user_id: int, strategy_name: str, pnl: float):
+    """
+    记录每笔交易对应策略的绩效，用于策略自动降权。
+    """
+    try:
+        from execution.db_handler import get_conn
+        conn = get_conn()
+        conn.execute("""
+            INSERT INTO strategy_performance
+              (user_id, strategy_name, pnl, recorded_at)
+            VALUES (?, ?, ?, datetime('now'))
+        """, (user_id, strategy_name, pnl))
+        conn.commit()
+    except Exception:
+        pass  # 表可能尚未创建，静默失败
+
+
+def _get_strategy_win_rate(user_id: int, strategy_name: str,
+                           lookback: int = 20) -> float:
+    """
+    获取某策略最近 N 笔交易的胜率。
+    返回 [0, 1]，无数据返回 0.5（默认中性）。
+    """
+    try:
+        from execution.db_handler import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT pnl FROM strategy_performance "
+            "WHERE user_id=? AND strategy_name=? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, strategy_name, lookback)
+        ).fetchall()
+        if not rows or len(rows) < 3:
+            return 0.5
+        wins = sum(1 for r in rows if r[0] > 0)
+        return wins / len(rows)
+    except Exception:
+        return 0.5
+
+
 # ── 主循环 ────────────────────────────────────────────────────────────────────
 
 def run_user_bot(bot_state, override_strategy: str = None):
@@ -478,6 +633,12 @@ def run_user_bot(bot_state, override_strategy: str = None):
         from strategy.selector import MarketRegimeSelector
         selector = MarketRegimeSelector(global_cfg)
         logger.info(f"{tag} 自动策略选择器已启用")
+        # V2.0: 注册 selector 到 manager，供 API 读取 regime 详情
+        try:
+            from core.user_bot import manager as _mgr
+            _mgr.register_user_selector(user_id, selector)
+        except Exception:
+            pass
 
     strategy = get_strategy(
         "PA_5S" if use_auto else strategy_name,
@@ -537,6 +698,16 @@ def run_user_bot(bot_state, override_strategy: str = None):
             logger.warning(f"{tag} 全局 Telegram 也未配置，所有通知将被跳过！")
 
     logger.info(f"{tag} Bot 启动，策略={cfg['strategy_name']}，品种={SYMBOL}")
+
+    # V2.5: 从 config 加载高级风控参数
+    v25_cfg = global_cfg.get("risk_v25", {})
+    TRAILING_STOP_ENABLE = v25_cfg.get("trailing_stop_enable", True)
+    TRAILING_STOP_TRIGGER = v25_cfg.get("trailing_stop_trigger", 0.5)   # 盈利达 ATR*0.5 后激活
+    TRAILING_STOP_DISTANCE = v25_cfg.get("trailing_stop_distance", 0.8) # 回撤 ATR*0.8 触发
+    TIME_STOP_BARS = v25_cfg.get("time_stop_bars", 24)                  # 最多持仓 24 根K线
+    TIME_STOP_ENABLE = v25_cfg.get("time_stop_enable", True)
+    DYNAMIC_POSITION_ENABLE = v25_cfg.get("dynamic_position_enable", True)
+
     notify(
         f"🚀 <b>{username} 的 Bot 已启动</b>\n"
         f"策略: {cfg['strategy_name']} | 品种: {SYMBOL} | 杠杆: {LEVERAGE}x"
@@ -645,6 +816,11 @@ def run_user_bot(bot_state, override_strategy: str = None):
                                  net_pnl,
                                  fill_src)
 
+                    # V2.5: 记录策略绩效
+                    _record_strategy_performance(
+                        user_id, state.get("strategy_name", ""), net_pnl
+                    )
+
                     current_balance = _get_swap_usdt(ex)
                     rm.notify_trade_result(net_pnl, current_balance)
                     _save_risk_state(user_id, rm)
@@ -686,7 +862,16 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
             # ── AUTO模式：每轮评估市场状态，按需热切换策略 ──────────────────
             if use_auto and selector is not None:
-                new_strategy, regime_result = selector.get_strategy(df)
+                new_strategy, regime_result = selector.get_strategy(df, SYMBOL)
+
+                # V1.5: WAIT 观望状态 → 空仓时跳过本轮，有仓位继续监控
+                if regime_result.get("regime") == "wait" and state["position_amount"] == 0:
+                    logger.info(
+                        f"{tag} 📋 WAIT 观望，跳过开仓 ({regime_result['reason']})"
+                    )
+                    stop_ev.wait(INTERVAL)
+                    continue
+
                 if new_strategy is not None:
                     old_name = strategy.name
                     strategy = new_strategy
@@ -733,6 +918,32 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     continue
 
                 contracts = int(math.floor(usdt_free * RISK_PCT / risk_per))
+
+                # V2.5: 动态仓位 - 根据 regime 置信度调整
+                if DYNAMIC_POSITION_ENABLE and use_auto and selector is not None:
+                    regime_conf = getattr(selector, 'last_regime_detail', {}).get('confidence', 1.0)
+                    # 置信度高 (>0.7) → 全仓，低 (0.3~0.7) → 按比例缩减
+                    if regime_conf < 0.7:
+                        conf_scale = max(0.4, regime_conf / 0.7)
+                        contracts = max(1, int(contracts * conf_scale))
+                        logger.info(
+                            f"{tag} 📊 动态仓位: 置信度={regime_conf:.2f} "
+                            f"缩放={conf_scale:.2f} → {contracts} 张"
+                        )
+
+                    # V2.5: 策略绩效降权 - 最近胜率低的策略减仓
+                    strat_wr = _get_strategy_win_rate(user_id, strategy.name)
+                    if strat_wr < 0.35:  # 胜率低于 35%
+                        contracts = max(1, int(contracts * 0.6))
+                        logger.info(
+                            f"{tag} ⚠️ 策略 {strategy.name} 近期胜率低 "
+                            f"({strat_wr:.0%})，降权仓位: {contracts} 张"
+                        )
+
+                # V1.5: 策略切换过渡期，使用半仓试探
+                if use_auto and selector is not None and selector.in_transition:
+                    contracts = max(1, contracts // 2)
+                    logger.info(f"{tag} ⚠️ 策略过渡期，半仓试探: {contracts} 张")
 
                 # Fix: max_trade_amount 是金额(USDT)上限，需换算为张数上限后再比较
                 max_contracts_by_amount = int(math.floor(
@@ -888,6 +1099,29 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 if is_long  and action == "SELL": close_reason = f"策略反转: {reason}"
                 if not is_long and action == "BUY":  close_reason = f"策略反转: {reason}"
 
+                # ── V2.5: Trailing Stop (动态追踪止损) ────────────────────────
+                if TRAILING_STOP_ENABLE and not close_reason and state["position_amount"] > 0:
+                    _do_trailing_stop(
+                        state, current_price, is_long, entry, df,
+                        TRAILING_STOP_TRIGGER, TRAILING_STOP_DISTANCE,
+                        ex, SYMBOL, close_side, pos_side_str,
+                        logger, notify, tag, user_id,
+                    )
+
+                # ── V2.5: 时间止损（持仓超 N 根K线强制平仓）────────────────
+                if TIME_STOP_ENABLE and not close_reason and state["position_amount"] > 0:
+                    state["entry_bar_count"] = state.get("entry_bar_count", 0) + 1
+                    if state["entry_bar_count"] >= TIME_STOP_BARS:
+                        # 只在不亏损时执行时间止损（避免亏损放大）
+                        if is_long and current_price >= entry:
+                            close_reason = f"时间止损: 持仓{state['entry_bar_count']}根K线"
+                        elif not is_long and current_price <= entry:
+                            close_reason = f"时间止损: 持仓{state['entry_bar_count']}根K线"
+                        elif state["entry_bar_count"] >= TIME_STOP_BARS * 1.5:
+                            # 超时1.5倍，无论盈亏都平仓
+                            close_reason = f"强制时间止损: 持仓{state['entry_bar_count']}根K线"
+                    _save_state(user_id, state)
+
                 if close_reason:
                     _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
 
@@ -914,6 +1148,11 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     record_trade(user_id, close_side, fill_price,
                                  state["position_amount"], SYMBOL, "平仓",
                                  net_pnl, close_reason)
+
+                    # V2.5: 记录策略绩效
+                    _record_strategy_performance(
+                        user_id, state.get("strategy_name", ""), net_pnl
+                    )
 
                     usdt_free = _get_swap_usdt(ex)
                     rm.notify_trade_result(net_pnl, usdt_free)
@@ -993,3 +1232,9 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
     logger.info(f"{tag} Bot 已停止")
     notify(f"🛑 <b>{username} 的 Bot 已停止</b>")
+    # V2.0: 清理 selector 注册
+    try:
+        from core.user_bot import manager as _mgr
+        _mgr.unregister_user_selector(user_id)
+    except Exception:
+        pass

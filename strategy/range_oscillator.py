@@ -43,7 +43,7 @@ class RangeOscillatorStrategy(BaseStrategy):
         },
         {
             "key": "rsi_ob", "label": "RSI超买线",
-            "type": "int", "default": 65, "min": 60, "max": 75, "step": 5,
+            "type": "int", "default": 65, "min": 55, "max": 75, "step": 5,
             "tip": "震荡行情中适当降低超买阈值",
         },
         {
@@ -61,12 +61,13 @@ class RangeOscillatorStrategy(BaseStrategy):
         },
         {
             "key": "atr_sl_mult", "label": "ATR止损倍数",
-            "type": "float", "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.5,
-            "tip": "震荡策略止损相对较紧",
+            "type": "float", "default": 0.8, "min": 0.3, "max": 2.0, "step": 0.1,
+            "tip": "震荡策略止损更紧（BTC 1h 推荐 0.8，快进快出）",
         },
         {
             "key": "cooldown", "label": "信号冷却期",
-            "type": "int", "default": 5, "min": 3, "max": 15, "step": 1,
+            "type": "int", "default": 4, "min": 3, "max": 15, "step": 1,
+            "tip": "两次信号之间最少间隔K线数（BTC 1h 推荐 4）",
         },
     ]
 
@@ -79,8 +80,8 @@ class RangeOscillatorStrategy(BaseStrategy):
         rsi_os:      int   = 35,
         kdj_period:  int   = 9,
         atr_period:  int   = 14,
-        atr_sl_mult: float = 1.0,
-        cooldown:    int   = 5,
+        atr_sl_mult: float = 0.8,
+        cooldown:    int   = 4,
     ):
         super().__init__(name="RANGE_震荡均值回归策略")
         self.bb_period   = bb_period

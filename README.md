@@ -4,6 +4,19 @@
 
 ---
 
+## 📦 版本变更日志
+
+| 版本 | 内容 |
+|------|------|
+| **V3.5** | 回测引擎大升级：AUTO 模式回测、追踪止损、时间止损、动态仓位、策略切换明细、per-strategy 统计；前端回测页高级功能面板 |
+| **V3.0** | 前端可视化 + 市场数据 API：Dashboard 市场情绪面板、5 个 `/api/market/*` 端点、WebSocket 推送 regime 详情 |
+| **V2.5** | 高级风控：Trailing Stop、时间止损、动态仓位、策略绩效追踪表、DB migration v3 |
+| **V2.0** | 资金费率 + OI 链上数据增强、AI 情绪分析客户端（OpenAI 兼容）、选择器多维评分 |
+| **V1.5** | 策略参数优化（BTC/USDT 1h）、WAIT 观望状态、波动率快速通道、策略切换过渡期 |
+| **V1.0** | 基础交易系统：6 策略 + AUTO 选择器、风控熔断、WebUI、回测、Telegram 通知 |
+
+---
+
 ## ⚙️ AI 运维指南
 
 > **[Instruction for AI Models]**
@@ -26,7 +39,7 @@
 │                     FastAPI 后端 (api/server.py)                    │
 │  端口 8080 | uvicorn 单 worker                                      │
 │  路由：/api/auth  /api/keys  /api/bot  /api/data                   │
-│        /api/notify  /api/user-config  /api/health                  │
+│        /api/notify  /api/user-config  /api/market  /api/health     │
 │  认证：JWT (Bearer Token) | 加密：Fernet AES-256                   │
 │  CORS：config.yaml → api.cors_origins                              │
 └────────┬──────────────────────────────────────────────────────────┘
@@ -41,29 +54,31 @@
 │  每用户独立线程      │    │       daily_balance, bot_state,       │
 │  + RiskManager       │    │       risk_state, user_settings,      │
 │  + Watchdog 守护     │    │       backtest_history,               │
-│  (60s 检测+指数退避) │    │       schema_version                  │
+│  (60s 检测+指数退避) │    │       schema_version,                 │
+│                      │    │       strategy_performance (V2.5)     │
 └──────────┬───────────┘    └──────────────────────────────────────┘
            │
            ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │             Bot Runner (core/user_bot/runner.py)                  │
 │  主循环：拉K线 → 策略信号 → 风控检查 → 下单 → 监控持仓 → 通知  │
+│  V2.5：Trailing Stop + 时间止损 + 动态仓位 + 策略绩效追踪       │
 │  网络分级：rate_limit / maintenance / auth_error / network       │
 │  持仓状态：bot_state 表 (JSON)                                   │
 │  被动平仓：优先拉交易所真实成交记录                              │
 │  订单对账：启动时核对 SL/TP 条件单                               │
 └──────────────┬───────────────────────────────────────────────────┘
                │
-    ┌──────────┼──────────────┐
-    ▼          ▼              ▼
-┌────────┐ ┌──────────┐ ┌──────────────────┐
-│ OKX    │ │ Strategy │ │ Risk Manager     │
-│ (ccxt) │ │ Layer    │ │ (risk/           │
-│        │ │ 6 策略   │ │  risk_manager.py)│
-│ 实/模  │ │ + AUTO   │ │ 连亏熔断         │
-│ 盘切换 │ │ 选择器   │ │ 日亏熔断         │
-│        │ │          │ │ 仓位计算         │
-└────────┘ └──────────┘ └──────────────────┘
+    ┌──────────┼──────────────┬──────────────────┐
+    ▼          ▼              ▼                    ▼
+┌────────┐ ┌──────────┐ ┌──────────────────┐ ┌──────────────────┐
+│ OKX    │ │ Strategy │ │ Risk Manager     │ │ Market Data      │
+│ (ccxt) │ │ Layer    │ │ (risk/           │ │ (V2.0)           │
+│        │ │ 6 策略   │ │  risk_manager.py)│ │ 资金费率 + OI    │
+│ 实/模  │ │ + AUTO   │ │ 连亏熔断         │ │ (market_extra.py)│
+│ 盘切换 │ │ 选择器   │ │ 日亏熔断         │ │ AI 情绪分析      │
+│        │ │          │ │ 仓位计算         │ │ (ai_client.py)   │
+└────────┘ └──────────┘ └──────────────────┘ └──────────────────┘
 ```
 
 ### 1.1 进程模型
@@ -119,14 +134,15 @@ QuantProject/
 │       ├── bot.py              # POST /api/bot/start, /stop, GET /status, POST /risk/resume
 │       ├── data.py             # GET /api/data/trades, /balance, /strategies
 │       │                       # POST /backtest/run, GET /backtest/result, /history
+│       ├── market.py           # 🆕 V3.0: 市场数据 API（regime/funding/OI/sentiment/绩效）
 │       ├── notify.py           # POST /api/notify/telegram/save, /test, /clear
 │       └── user_config.py      # GET /api/user-config, POST /save, DELETE /reset
 │
 ├── core/
 │   ├── okx_client.py           # OKX ccxt 封装（网络重试 + 指数退避）
 │   └── user_bot/
-│       ├── manager.py          # 多用户 Bot 注册表 + Watchdog 守护
-│       └── runner.py           # 每用户 Bot 主循环（核心交易逻辑）
+│       ├── manager.py          # 多用户 Bot 注册表 + Watchdog 守护 + selector 注册
+│       └── runner.py           # 每用户 Bot 主循环（核心交易逻辑 + V2.5 高级风控）
 │
 ├── strategy/
 │   ├── base.py                 # 策略基类 BaseStrategy
@@ -146,7 +162,7 @@ QuantProject/
 │   └── risk_manager.py         # 连亏熔断 + 日亏熔断 + Fixed Fractional Sizing
 │
 ├── backtest/
-│   └── engine.py               # 回测引擎（含滑点模拟/熔断模拟/Sharpe/Sortino/Calmar/MaxDD）
+│   └── engine.py               # 回测引擎 V3.5（AUTO 模式 / Trailing Stop / 时间止损 / 动态仓位）
 │
 ├── execution/
 │   └── db_handler.py           # SQLite 数据库（连接池 + migration + CRUD）
@@ -157,12 +173,14 @@ QuantProject/
 │
 ├── data/
 │   ├── market_data.py          # 行情数据获取与缓存
+│   ├── market_extra.py         # 🆕 V2.0: 资金费率 + OI 链上数据（OKX 公开 API）
 │   └── *.csv                   # 回测用历史数据
 │
 ├── utils/
 │   ├── config_loader.py        # YAML 配置加载（线程安全热更新）
 │   ├── logger.py               # 统一日志（全局 bot_logger + per-user logger）
 │   ├── notifier.py             # Telegram + Webhook 通知（多渠道组合）
+│   ├── ai_client.py            # 🆕 V2.0: AI 情绪分析客户端（OpenAI 兼容）
 │   └── trade_state.py          # ⚠️ 已弃用，遗留单用户模块
 │
 ├── scripts/
@@ -290,6 +308,7 @@ QuantProject/
 | `bot_state` | `user_id` | 持仓状态 JSON（仓位方向、入场价、SL/TP 订单ID 等） |
 | `risk_state` | `user_id` | 风控持久化（连亏次数、日初余额、熔断标志） |
 | `backtest_history` | `id` (自增) | 回测历史（每用户最多 20 条，含完整结果 JSON） |
+| `strategy_performance` | `id` (自增) | 🆕 V2.5: 策略绩效追踪（每笔交易按策略记录 PnL） |
 
 ### 4.1 `bot_state.value` JSON 结构
 
@@ -320,7 +339,7 @@ QuantProject/
 - 由 `db_handler.py::init_db()` 的 `_MIGRATIONS` 列表管理
 - 每个迁移是 `(version, description, sql_list)` 三元组
 - 新增迁移只需在列表尾部追加，启动时自动执行
-- 当前版本：**v2**
+- 当前版本：**v3**（V2.5 新增 `strategy_performance` 表）
 
 ---
 
@@ -385,7 +404,17 @@ QuantProject/
 | DELETE | `/api/user-config/reset` | 重置为全局默认 |
 | GET | `/api/user-config/strategy-params/{name}` | 策略参数元数据 |
 
-### 5.7 其他
+### 5.7 市场数据（V3.0）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/market/regime` | 当前 regime 状态详情（技术面/资金费率/OI 评分） |
+| GET | `/api/market/funding-rate?symbol=` | 资金费率实时 + 最近 24 期历史 |
+| GET | `/api/market/open-interest?symbol=` | 持仓量 (OI) 实时 |
+| GET | `/api/market/sentiment?symbol=` | 综合市场情绪面板（资金费率+OI+新闻+AI） |
+| GET | `/api/market/strategy-performance` | 各策略绩效统计（胜率/盈亏比/总PnL） |
+
+### 5.8 其他
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -414,14 +443,24 @@ QuantProject/
 选择器流程（`strategy/selector.py::MarketRegimeSelector`）：
 
 1. **技术面分析**（权重 `selector.tech_weight`，默认 1.0）：
-   - ADX 趋势强度（>25 有趋势，<20 震荡，>40 强势突破）
-   - EMA 20/50/200 排列方向
+   - ADX 趋势强度（>22 有趋势，<18 震荡，>40 强势突破）
+   - EMA 14/40/120 排列方向
    - 布林带宽度（squeeze_pct < 3% 认为挤压）
-2. **新闻情绪分析**（权重 `selector.news_weight`，默认 0.0 因为 AI 客户端未接入时应禁用）：
+   - ATR 突变检测（波动率快速通道）
+2. **资金费率 + OI 信号**（V2.0，权重 `funding_weight=0.15` + `oi_weight=0.10`）：
+   - OKX 公开 API 实时获取，内存缓存 + SQLite 持久化
+   - 资金费率：正费率高 → 多头拥挤 → bearish，负费率高 → 空头拥挤 → bullish
+   - OI 变化：上升 = 新资金入场，下降 = 去杠杆
+3. **新闻 + AI 情绪分析**（权重 `selector.news_weight`，默认 0.0）：
    - 多源新闻抓取 + 关键词/AI 情绪评分
-3. **加权投票** → 判定 regime：`bull` / `bear` / `ranging` / `breakout`
-4. **防抖保护**：连续 `confirm_bars`（默认 3）根 K 线确认才正式切换策略
-5. **策略映射**：根据 `selector.strategy_bull/bear/ranging/breakout` 映射到具体策略
+   - 支持 OpenAI / DeepSeek 等兼容接口
+   - 动态权重：根据新闻新鲜度、数量、AI 可用性自动调整
+4. **WAIT 观望状态**（V1.5）：
+   - ADX 模糊区间 + ATR 突变无方向 → 不交易
+   - 策略切换过渡期前 3 根 K 线半仓试探
+5. **加权投票** → 判定 regime：`bull` / `bear` / `ranging` / `breakout` / `wait`
+6. **防抖保护**：连续 `confirm_bars`（默认 3）根 K 线确认才正式切换策略
+7. **策略映射**：根据 `selector.strategy_bull/bear/ranging/breakout` 映射到具体策略
 
 ### 6.3 添加新策略
 
@@ -448,7 +487,16 @@ QuantProject/
 | 单笔金额上限 | `max_trade_amount` | 1000 USDT | 订单前置拦截 |
 | 仓位计算 | `risk_per_trade_pct` | 1% | Fixed Fractional Sizing（含手续费扣减） |
 
-### 7.2 风控生命周期
+### 7.2 V2.5 高级风控
+
+| 功能 | 配置项 | 说明 |
+|------|--------|------|
+| **追踪止损 (Trailing Stop)** | `risk_v25.trailing_stop_*` | 盈利达 ATR×0.5 后激活，价格回撤 ATR×0.8 上移 SL；只上移不回退 |
+| **时间止损 (Time Stop)** | `risk_v25.time_stop_*` | 持仓超 24 根 K 线（1h=24h）且不亏损时平仓；超 36 根强制平仓 |
+| **动态仓位 (Dynamic Position)** | `risk_v25.dynamic_position_enable` | regime 置信度 < 0.7 时按比例缩减仓位；策略近期胜率 < 35% 降权 60% |
+| **策略绩效追踪** | DB: `strategy_performance` | 每笔交易记录对应策略的 PnL，用于动态仓位决策 |
+
+### 7.3 风控生命周期
 
 ```
 Bot 启动 → _restore_risk_state()（从 risk_state 表恢复）
@@ -460,7 +508,7 @@ Bot 启动 → _restore_risk_state()（从 risk_state 表恢复）
 用户恢复 → POST /api/bot/risk/resume → manual_resume()（清零 + 重启）
 ```
 
-### 7.3 仓位计算公式
+### 7.4 仓位计算公式
 
 ```python
 # Fixed Fractional Sizing（risk/risk_manager.py::calculate_position_size）
@@ -498,7 +546,23 @@ selector:                       # AUTO 模式选择器参数
   tech_weight: 1.0              # 技术面权重
   news_weight: 0.0              # 新闻面权重（AI 未接入时设 0）
   confirm_bars: 3               # 防抖确认根数
+  enable_market_extra: true     # 🆕 V2.0: 是否启用资金费率/OI 数据增强
+  funding_weight: 0.15          # 🆕 V2.0: 资金费率权重
+  oi_weight: 0.10               # 🆕 V2.0: OI 权重
   # ... 详细参数见 config.yaml 文件注释
+
+ai:                             # 🆕 V2.0: AI 情绪分析客户端
+  api_key: ""                   # 填入 API Key 后自动启用
+  base_url: "https://api.openai.com/v1"   # 或 DeepSeek / 零一万物
+  model: "gpt-4o-mini"          # 推荐：gpt-4o-mini 或 deepseek-chat
+
+risk_v25:                       # 🆕 V2.5: 高级风控参数
+  trailing_stop_enable: true    # 追踪止损
+  trailing_stop_trigger: 0.5    # 盈利达 ATR*此值后激活
+  trailing_stop_distance: 0.8   # 回撤 ATR*此值更新 SL
+  time_stop_enable: true        # 时间止损
+  time_stop_bars: 24            # 最多持仓 N 根 K 线
+  dynamic_position_enable: true # 动态仓位
 
 api:
   host: "0.0.0.0"
@@ -518,6 +582,9 @@ api:
 | `TG_CHAT_ID` | 可选 | 手动填写 | 全局 Telegram Chat ID |
 | `ENCRYPT_KEY` | ✅ | `deploy.sh` 自动生成 | Fernet 对称加密密钥（保护 API Key） |
 | `JWT_SECRET` | ✅ | `deploy.sh` 自动生成 | JWT 签名密钥 |
+| `AI_API_KEY` | 可选 | 手动填写或 config.yaml | AI 情绪分析 API Key（V2.0） |
+| `AI_BASE_URL` | 可选 | 手动填写或 config.yaml | AI API 地址（默认 OpenAI） |
+| `AI_MODEL` | 可选 | 手动填写或 config.yaml | AI 模型名称 |
 
 > ⚠️ **安全提醒**：`.env` 文件权限应为 600。`ENCRYPT_KEY` 丢失将导致所有已加密的 API Key 无法解密！
 
@@ -755,8 +822,9 @@ runner.py 内置网络错误分类（`_classify_error`）：
 
 ## 14. 回测引擎
 
-`backtest/engine.py::run_backtest()`
+`backtest/engine.py::run_backtest()` — **V3.5**
 
+### 14.1 基础能力
 - **滑点模拟**：开仓/平仓/反转均含滑点（方向相关）
 - **手续费**：逐笔计算 taker_fee
 - **熔断模拟**：连亏/日亏触发后暂停交易
@@ -765,6 +833,37 @@ runner.py 内置网络错误分类（`_classify_error`）：
 - **异步执行**：后台 Thread 运行，通过 `_backtest_results` + `_backtest_lock` 安全通信
 - **历史持久化**：每用户最多保留 20 条历史回测结果
 
+### 14.2 V3.5 新增功能
+
+| 功能 | 说明 |
+|------|------|
+| **AUTO 模式回测** | `strategy="AUTO"` 时内置 MarketRegimeSelector，每 5 根 K 线评估 regime，自动切换策略（纯技术面驱动，禁用新闻/链上数据） |
+| **追踪止损** | 盈利达 ATR × trigger 后激活，最优价回撤 ATR × distance 时上移 SL |
+| **时间止损** | 持仓超 N 根 K 线且不亏损时平仓，超 1.5N 强制平仓 |
+| **动态仓位** | AUTO 模式下 regime 置信度 < 0.7 按比例缩减仓位；策略近期胜率 < 35% 降权 60% |
+| **策略切换明细** | 记录每次切换的 bar_idx / time / from→to / regime / confidence / reason |
+| **per-strategy 统计** | 回测结果按策略分别统计交易数、胜率、盈亏 |
+| **WAIT 观望** | AUTO 模式下 WAIT 状态跳过开仓 |
+
+### 14.3 回测结果字段
+
+```json
+{
+  "trades": [...],              // 每笔交易（新增 strategy 字段）
+  "equity_curve": [...],        // 权益曲线
+  "sharpe_ratio": 1.5,
+  "max_drawdown_pct": 12.3,
+  "is_auto_mode": true,         // V3.5: 是否 AUTO 模式
+  "strategy_switches": [...],   // V3.5: 策略切换明细列表
+  "per_strategy_stats": {...},  // V3.5: 各策略统计
+  "features": {                 // V3.5: 启用的高级功能
+    "trailing_stop": true,
+    "time_stop": true,
+    "dynamic_pos": false
+  }
+}
+```
+
 ---
 
 ## 15. 前端页面功能
@@ -772,10 +871,10 @@ runner.py 内置网络错误分类（`_classify_error`）：
 | 页面 | 路由 | 功能 |
 |------|------|------|
 | AuthPage | `/login` | 登录/注册切换 |
-| Dashboard | `/` | Bot 启停、实时 WebSocket 状态、持仓卡片、浮动盈亏、熔断恢复 |
+| Dashboard | `/` | Bot 启停、实时 WebSocket 状态、持仓卡片、浮动盈亏、熔断恢复；🆕 V3.0: 市场状态面板（资金费率+OI+新闻情绪+综合信号）、Regime 状态标签 |
 | TradesPage | `/trades` | 历史交易记录分页、胜率/总PnL统计 |
 | BalancePage | `/balance` | 资产曲线图（Recharts）+ OKX 实时余额 |
-| BacktestPage | `/backtest` | 策略/品种/参数选择 → 触发回测 → K线图 + 权益曲线 + 交易列表 |
+| BacktestPage | `/backtest` | 策略/品种/参数选择 → 触发回测 → K线图 + 权益曲线 + 交易列表；🆕 V3.5: AUTO 模式、高级功能开关、策略切换明细表、各策略绩效对比 |
 | SettingsPage | `/settings` | OKX API Key 管理、策略/品种/杠杆/风控配置、TG 通知配置 |
 
 前端特性：

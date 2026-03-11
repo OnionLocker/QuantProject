@@ -77,4 +77,13 @@ export const userConfigApi = {
   reset: ()     => api.delete('/api/user-config/reset'),
 }
 
+// V3.0: 市场数据 API
+export const marketApi = {
+  regime:             ()     => api.get('/api/market/regime'),
+  fundingRate:        (sym)  => api.get(`/api/market/funding-rate?symbol=${sym || 'BTC/USDT:USDT'}`),
+  openInterest:       (sym)  => api.get(`/api/market/open-interest?symbol=${sym || 'BTC/USDT:USDT'}`),
+  sentiment:          (sym)  => api.get(`/api/market/sentiment?symbol=${sym || 'BTC/USDT:USDT'}`),
+  strategyPerformance:()     => api.get('/api/market/strategy-performance'),
+}
+
 export default api

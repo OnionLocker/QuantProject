@@ -28,8 +28,8 @@ class TrendBearStrategy(BaseStrategy):
     PARAMS = [
         {
             "key": "ema_fast", "label": "快速EMA周期",
-            "type": "int", "default": 9, "min": 5, "max": 30, "step": 1,
-            "tip": "快线，用于金叉/死叉信号",
+            "type": "int", "default": 8, "min": 5, "max": 30, "step": 1,
+            "tip": "快线，用于金叉/死叉信号（BTC 1h 推荐 8）",
         },
         {
             "key": "ema_slow", "label": "慢速EMA周期",
@@ -38,8 +38,8 @@ class TrendBearStrategy(BaseStrategy):
         },
         {
             "key": "ema_trend", "label": "趋势EMA周期",
-            "type": "int", "default": 50, "min": 30, "max": 200, "step": 10,
-            "tip": "大趋势参考线，价格在此下方才开空",
+            "type": "int", "default": 40, "min": 20, "max": 200, "step": 10,
+            "tip": "大趋势参考线（BTC 1h 推荐 40）",
         },
         {
             "key": "adx_period", "label": "ADX周期",
@@ -48,8 +48,8 @@ class TrendBearStrategy(BaseStrategy):
         },
         {
             "key": "adx_threshold", "label": "ADX阈值",
-            "type": "int", "default": 25, "min": 15, "max": 40, "step": 5,
-            "tip": "趋势强度阈值",
+            "type": "int", "default": 22, "min": 15, "max": 40, "step": 5,
+            "tip": "趋势强度阈值（BTC 1h 推荐 22）",
         },
         {
             "key": "rsi_period", "label": "RSI周期",
@@ -57,8 +57,8 @@ class TrendBearStrategy(BaseStrategy):
         },
         {
             "key": "rsi_ob", "label": "RSI超买线",
-            "type": "int", "default": 65, "min": 60, "max": 80, "step": 5,
-            "tip": "熊市中超买阈值适当降低",
+            "type": "int", "default": 62, "min": 55, "max": 80, "step": 5,
+            "tip": "熊市中超买阈值适当降低（BTC 1h 推荐 62）",
         },
         {
             "key": "rsi_os", "label": "RSI超卖线",
@@ -70,32 +70,35 @@ class TrendBearStrategy(BaseStrategy):
         },
         {
             "key": "atr_sl_mult", "label": "ATR止损倍数",
-            "type": "float", "default": 1.5, "min": 1.0, "max": 3.0, "step": 0.5,
+            "type": "float", "default": 1.2, "min": 0.5, "max": 3.0, "step": 0.1,
+            "tip": "止损 = 入场价 ± ATR × 倍数（BTC 1h 推荐 1.2）",
         },
         {
             "key": "rr1", "label": "止盈倍数 (TP1)",
-            "type": "float", "default": 2.0, "min": 1.0, "max": 5.0, "step": 0.5,
+            "type": "float", "default": 1.5, "min": 1.0, "max": 5.0, "step": 0.5,
+            "tip": "TP1 = 入场价 ± 止损距离 × 倍数（BTC 1h 推荐 1.5）",
         },
         {
             "key": "cooldown", "label": "信号冷却期",
-            "type": "int", "default": 6, "min": 3, "max": 20, "step": 1,
+            "type": "int", "default": 4, "min": 3, "max": 20, "step": 1,
+            "tip": "两次信号之间最少间隔K线数（BTC 1h 推荐 4）",
         },
     ]
 
     def __init__(
         self,
-        ema_fast:      int   = 9,
+        ema_fast:      int   = 8,
         ema_slow:      int   = 21,
-        ema_trend:     int   = 50,
+        ema_trend:     int   = 40,
         adx_period:    int   = 14,
-        adx_threshold: int   = 25,
+        adx_threshold: int   = 22,
         rsi_period:    int   = 14,
-        rsi_ob:        int   = 65,
+        rsi_ob:        int   = 62,
         rsi_os:        int   = 30,
         atr_period:    int   = 14,
-        atr_sl_mult:   float = 1.5,
-        rr1:           float = 2.0,
-        cooldown:      int   = 6,
+        atr_sl_mult:   float = 1.2,
+        rr1:           float = 1.5,
+        cooldown:      int   = 4,
     ):
         super().__init__(name="BEAR_趋势跟踪熊市策略")
         self.ema_fast      = ema_fast

@@ -40,13 +40,13 @@ class BigCandleStrategy(BaseStrategy):
     PARAMS = [
         {
             "key": "body_pct", "label": "大阳线实体涨幅阈值 (%)",
-            "type": "float", "default": 1.5, "min": 0.8, "max": 5.0, "step": 0.1,
-            "tip": "K线收盘与开盘的价差/开盘价 ≥ 此值才认定为大阳线",
+            "type": "float", "default": 1.2, "min": 0.5, "max": 5.0, "step": 0.1,
+            "tip": "K线实体涨幅 ≥ 此值才认定为大阳线（BTC 1h 推荐 1.2%，低波动期也能触发）",
         },
         {
             "key": "vol_mult", "label": "成交量倍数",
-            "type": "float", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.5,
-            "tip": "成交量需 ≥ 近20根K线均量 × 此倍数",
+            "type": "float", "default": 1.3, "min": 1.0, "max": 4.0, "step": 0.1,
+            "tip": "成交量需 ≥ 近20根K线均量 × 此倍数（BTC 1h 推荐 1.3）",
         },
         {
             "key": "vol_ma", "label": "均量参考周期",
@@ -55,18 +55,18 @@ class BigCandleStrategy(BaseStrategy):
         },
         {
             "key": "body_ratio_min", "label": "最小实体占比 (%)",
-            "type": "float", "default": 60.0, "min": 30.0, "max": 90.0, "step": 5.0,
-            "tip": "实体占整根K线(high-low)的比例，越高说明影线越短（越强）",
+            "type": "float", "default": 55.0, "min": 30.0, "max": 90.0, "step": 5.0,
+            "tip": "实体占整根K线的比例（BTC 1h 推荐 55%，稍微放宽以捕获更多信号）",
         },
         {
             "key": "high_pos_pct", "label": "高位过滤：近N根涨幅上限 (%)",
-            "type": "float", "default": 40.0, "min": 20.0, "max": 100.0, "step": 5.0,
-            "tip": "近60根K线内涨幅已超过此值，认为高位，大阳线不开多",
+            "type": "float", "default": 35.0, "min": 20.0, "max": 100.0, "step": 5.0,
+            "tip": "近期已涨超此值不追多（BTC 1h 推荐 35%）",
         },
         {
             "key": "high_pos_lookback", "label": "高位过滤回溯K线数",
-            "type": "int", "default": 60, "min": 20, "max": 120, "step": 10,
-            "tip": "计算高位涨幅的回溯K线数",
+            "type": "int", "default": 48, "min": 20, "max": 120, "step": 10,
+            "tip": "计算高位涨幅的回溯K线数（BTC 1h 推荐 48 = 2天）",
         },
         {
             "key": "rsi_period", "label": "RSI周期",
@@ -85,8 +85,8 @@ class BigCandleStrategy(BaseStrategy):
         },
         {
             "key": "breakout_lookback", "label": "突破高点回溯K线数",
-            "type": "int", "default": 20, "min": 10, "max": 50, "step": 5,
-            "tip": "M2/M3场景：突破此范围内的最高价才触发",
+            "type": "int", "default": 16, "min": 10, "max": 50, "step": 2,
+            "tip": "M2/M3场景：突破此范围内的最高价才触发（BTC 1h 推荐 16 ≈ 16小时）",
         },
         {
             "key": "bb_period", "label": "布林带周期 (M3场景)",
@@ -100,8 +100,8 @@ class BigCandleStrategy(BaseStrategy):
         },
         {
             "key": "sl_mode", "label": "止损模式 (0=开盘价, 1=最低价, 2=ATR)",
-            "type": "int", "default": 0, "min": 0, "max": 2, "step": 1,
-            "tip": "0=大阳线开盘价(原版), 1=大阳线最低价(紧), 2=ATR动态止损",
+            "type": "int", "default": 1, "min": 0, "max": 2, "step": 1,
+            "tip": "1=大阳线最低价(推荐，更紧凑), 0=开盘价(原版), 2=ATR动态",
         },
         {
             "key": "atr_period", "label": "ATR周期",
@@ -110,18 +110,18 @@ class BigCandleStrategy(BaseStrategy):
         },
         {
             "key": "atr_sl_mult", "label": "ATR止损倍数",
-            "type": "float", "default": 1.5, "min": 0.5, "max": 3.0, "step": 0.5,
-            "tip": "sl_mode=2时: 止损 = 入场价 - ATR × 此倍数",
+            "type": "float", "default": 1.2, "min": 0.5, "max": 3.0, "step": 0.1,
+            "tip": "sl_mode=2时: 止损 = 入场价 - ATR × 此倍数（BTC 1h 推荐 1.2）",
         },
         {
             "key": "rr1", "label": "盈亏比 (TP1)",
-            "type": "float", "default": 2.0, "min": 1.0, "max": 5.0, "step": 0.5,
-            "tip": "TP1 = 入场价 + 风险距离 × 此值",
+            "type": "float", "default": 1.5, "min": 1.0, "max": 5.0, "step": 0.5,
+            "tip": "TP1 = 入场价 + 风险距离 × 此值（BTC 1h 推荐 1.5）",
         },
         {
             "key": "cooldown", "label": "信号冷却K线数",
-            "type": "int", "default": 5, "min": 2, "max": 20, "step": 1,
-            "tip": "两次信号之间最少间隔K线数，避免连续触发",
+            "type": "int", "default": 4, "min": 2, "max": 20, "step": 1,
+            "tip": "两次信号之间最少间隔K线数（BTC 1h 推荐 4）",
         },
         {
             "key": "enable_short", "label": "启用大阴线做空",
@@ -132,23 +132,23 @@ class BigCandleStrategy(BaseStrategy):
 
     def __init__(
         self,
-        body_pct:           float = 1.5,
-        vol_mult:           float = 1.5,
+        body_pct:           float = 1.2,
+        vol_mult:           float = 1.3,
         vol_ma:             int   = 20,
-        body_ratio_min:     float = 60.0,
-        high_pos_pct:       float = 40.0,
-        high_pos_lookback:  int   = 60,
+        body_ratio_min:     float = 55.0,
+        high_pos_pct:       float = 35.0,
+        high_pos_lookback:  int   = 48,
         rsi_period:         int   = 14,
         rsi_os:             int   = 40,
         ema_trend:          int   = 20,
-        breakout_lookback:  int   = 20,
+        breakout_lookback:  int   = 16,
         bb_period:          int   = 20,
         bb_squeeze_pct:     float = 3.0,
-        sl_mode:            int   = 0,
+        sl_mode:            int   = 1,
         atr_period:         int   = 14,
-        atr_sl_mult:        float = 1.5,
-        rr1:                float = 2.0,
-        cooldown:           int   = 5,
+        atr_sl_mult:        float = 1.2,
+        rr1:                float = 1.5,
+        cooldown:           int   = 4,
         enable_short:       int   = 1,
     ):
         super().__init__(name="BIG_CANDLE_大阳线策略")

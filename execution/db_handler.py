@@ -172,8 +172,19 @@ def init_db():
         (2, "兼容旧库: user_config 添加 risk_config 列", [
             "ALTER TABLE user_config ADD COLUMN risk_config TEXT DEFAULT NULL",
         ]),
+        (3, "V2.5: 策略绩效追踪表", [
+            '''CREATE TABLE IF NOT EXISTS strategy_performance (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL,
+                strategy_name TEXT    NOT NULL,
+                pnl           REAL    NOT NULL,
+                recorded_at   TEXT    DEFAULT (datetime('now'))
+            )''',
+            '''CREATE INDEX IF NOT EXISTS idx_strat_perf_user_strat
+            ON strategy_performance(user_id, strategy_name)''',
+        ]),
         # ── 未来新增迁移追加在这里 ──────────────────────────────────────────
-        # (3, "xxx", ["ALTER TABLE ..."]),
+        # (4, "xxx", ["ALTER TABLE ..."]),
     ]
 
     for version, desc, sqls in _MIGRATIONS:

@@ -30,6 +30,7 @@ from api.routes.bot         import router as bot_router
 from api.routes.data        import router as data_router
 from api.routes.notify      import router as notify_router
 from api.routes.user_config import router as user_config_router
+from api.routes.market      import router as market_router
 from api.auth.jwt_handler import get_current_user
 from core.user_bot import manager as bot_mgr
 from execution.db_handler import init_db
@@ -87,6 +88,7 @@ app.include_router(bot_router)
 app.include_router(data_router)
 app.include_router(notify_router)
 app.include_router(user_config_router)
+app.include_router(market_router)
 
 
 @app.get("/api/health")
@@ -170,6 +172,15 @@ async def ws_status(websocket: WebSocket, token: str = ""):
             except Exception:
                 pass
 
+        # V2.0: regime 状态详情
+        regime_detail = {}
+        try:
+            selector = bot_mgr.get_user_selector(uid)
+            if selector and hasattr(selector, 'last_regime_detail'):
+                regime_detail = selector.last_regime_detail or {}
+        except Exception:
+            pass
+
         return {
             "ts":                datetime.now().isoformat(),
             "running":           bs.get("running", False),
@@ -193,6 +204,7 @@ async def ws_status(websocket: WebSocket, token: str = ""):
             "today_trades":      today_trades,
             "today_pnl":         today_pnl,
             "contract_size":     get_config().get("bot", {}).get("contract_size", 0.01),
+            "regime_detail":     regime_detail,
         }
 
     try:

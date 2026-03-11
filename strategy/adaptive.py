@@ -37,44 +37,44 @@ class AdaptiveStrategy(PriceActionSetups):
         },
         {
             "key": "ema_slow", "label": "慢速 EMA 周期",
-            "type": "int", "default": 50, "min": 20, "max": 200, "step": 10,
-            "tip": "判断价格所处大结构位置（牛/熊分界线）",
+            "type": "int", "default": 40, "min": 20, "max": 200, "step": 10,
+            "tip": "判断价格所处大结构位置（BTC 1h 推荐 40）",
         },
         {
             "key": "adx_threshold", "label": "ADX 趋势阈值",
-            "type": "int", "default": 25, "min": 15, "max": 40, "step": 5,
-            "tip": "ADX > 阈值 = 有方向趋势；< 阈值 = 震荡",
+            "type": "int", "default": 22, "min": 15, "max": 40, "step": 5,
+            "tip": "ADX > 阈值 = 有方向趋势（BTC 1h 推荐 22）",
         },
         {
             "key": "confirm_bars", "label": "状态确认K线数",
-            "type": "int", "default": 6, "min": 2, "max": 20, "step": 1,
-            "tip": "连续 N 根K线同状态才切换，防止频繁误判",
+            "type": "int", "default": 4, "min": 2, "max": 20, "step": 1,
+            "tip": "连续 N 根K线同状态才切换（BTC 1h 推荐 4）",
         },
         # ── 继承 PA_5Setups 的所有信号参数 ──────────────────────────────
         {
             "key": "rr1", "label": "止盈倍数 (TP1)",
-            "type": "float", "default": 2.0, "min": 1.0, "max": 5.0, "step": 0.5,
-            "tip": "止盈 = 入场价 ± 止损距离 × 倍数",
+            "type": "float", "default": 1.5, "min": 1.0, "max": 5.0, "step": 0.5,
+            "tip": "止盈 = 入场价 ± 止损距离 × 倍数（BTC 1h 推荐 1.5）",
         },
         {
             "key": "ema_period", "label": "EMA 周期（信号过滤）",
-            "type": "int", "default": 20, "min": 5, "max": 50, "step": 1,
-            "tip": "S2/S3 信号层的趋势过滤均线",
+            "type": "int", "default": 14, "min": 5, "max": 50, "step": 1,
+            "tip": "S2/S3 信号层的趋势过滤均线（BTC 1h 推荐 14）",
         },
         {
             "key": "trend_bars", "label": "趋势判断周期",
-            "type": "int", "default": 20, "min": 10, "max": 50, "step": 5,
+            "type": "int", "default": 14, "min": 10, "max": 50, "step": 5,
             "tip": "S3 回调策略的趋势判断回看数",
         },
         {
             "key": "spring_bars", "label": "前高/低回看",
-            "type": "int", "default": 20, "min": 10, "max": 50, "step": 5,
+            "type": "int", "default": 14, "min": 10, "max": 50, "step": 5,
             "tip": "S5 假突破策略的近期高低点窗口",
         },
         {
             "key": "cooldown", "label": "信号冷却期",
-            "type": "int", "default": 8, "min": 3, "max": 20, "step": 1,
-            "tip": "两次信号之间的最少间隔K线数",
+            "type": "int", "default": 5, "min": 3, "max": 20, "step": 1,
+            "tip": "两次信号之间的最少间隔K线数（BTC 1h 推荐 5）",
         },
     ]
 
@@ -82,16 +82,16 @@ class AdaptiveStrategy(PriceActionSetups):
         self,
         # 市场状态检测参数
         adx_period:    int   = 14,
-        ema_slow:      int   = 50,
-        adx_threshold: int   = 25,
-        confirm_bars:  int   = 6,
+        ema_slow:      int   = 40,
+        adx_threshold: int   = 22,
+        confirm_bars:  int   = 4,
         # PA_5Setups 信号参数（透传给父类）
-        rr1:           float = 2.0,
-        ema_period:    int   = 20,
-        trend_bars:    int   = 20,
-        spring_bars:   int   = 20,
+        rr1:           float = 1.5,
+        ema_period:    int   = 14,
+        trend_bars:    int   = 14,
+        spring_bars:   int   = 14,
         atr_period:    int   = 14,
-        cooldown:      int   = 8,
+        cooldown:      int   = 5,
     ):
         # 父类 direction 设为 'both'，路由由本类控制
         super().__init__(

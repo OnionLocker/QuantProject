@@ -4,7 +4,7 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts'
-import { Play, RotateCcw, TrendingUp, TrendingDown, Percent, BarChart2, Award, AlertTriangle } from 'lucide-react'
+import { Play, RotateCcw, TrendingUp, TrendingDown, Percent, BarChart2, Award, AlertTriangle, Zap, Clock, Target } from 'lucide-react'
 import BacktestChart from '../components/BacktestChart'
 import TradeList from '../components/TradeList'
 import { Component } from 'react'
@@ -64,6 +64,10 @@ export default function BacktestPage() {
     fee_rate:        0.0005,
     slippage:        0.0002,
     strategy_params: {},
+    // V3.5: 高级功能开关
+    trailing_stop:   null,   // null = 读 config 默认
+    time_stop:       null,
+    dynamic_pos:     null,
   })
 
   const [running,  setRunning]  = useState(false)
@@ -172,9 +176,16 @@ export default function BacktestPage() {
                 <label className="form-label">策略</label>
                 <select value={form.strategy_name} onChange={onStrategyChange}>
                   {strategies.map(s => (
-                    <option key={s.name} value={s.name}>{s.name} · {s.class}</option>
+                    <option key={s.name} value={s.name}>
+                      {s.name === 'AUTO' ? '🤖 AUTO · 自动策略切换' : `${s.name} · ${s.class}`}
+                    </option>
                   ))}
                 </select>
+                {form.strategy_name === 'AUTO' && (
+                  <span className="form-hint" style={{ color:'var(--blue)' }}>
+                    🤖 AUTO 模式：根据市场状态自动切换 BULL/BEAR/RANGE 策略
+                  </span>
+                )}
               </div>
 
               <div className="form-grid-2">
@@ -235,8 +246,63 @@ export default function BacktestPage() {
             </div>
           </div>
 
-          {/* 右：策略参数 */}
+          {/* 右：策略参数 + V3.5 高级功能 */}
           <div>
+            {/* V3.5: 高级功能开关 */}
+            <div className="card mb-12">
+              <div className="card-header" style={{ display:'flex', alignItems:'center', gap:6 }}>
+                <Zap size={13} /> V3.5 高级功能
+              </div>
+              <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                {[
+                  { key:'trailing_stop', icon: Target, label:'追踪止损', desc:'盈利达到 ATR × 触发倍数后激活动态止损' },
+                  { key:'time_stop', icon: Clock, label:'时间止损', desc:'持仓超过 N 根 K 线自动平仓' },
+                  { key:'dynamic_pos', icon: BarChart2, label:'动态仓位', desc:'根据 regime 置信度和策略胜率缩放仓位' },
+                ].map(({ key, icon: Ic, label, desc }) => {
+                  const val = form[key]
+                  const isOn = val === true || val === null  // null = 默认启用
+                  return (
+                    <div key={key} style={{
+                      display:'flex', alignItems:'center', gap:10,
+                      padding:'8px 12px', borderRadius:8,
+                      background: isOn ? 'rgba(38,166,154,0.06)' : 'rgba(255,255,255,0.02)',
+                      border: `1px solid ${isOn ? 'rgba(38,166,154,0.2)' : 'rgba(255,255,255,0.06)'}`,
+                      cursor: 'pointer',
+                      transition: 'all .15s',
+                    }}
+                      onClick={() => {
+                        const next = val === null ? false : val === true ? false : true
+                        setForm(f => ({ ...f, [key]: next }))
+                      }}
+                    >
+                      <Ic size={14} style={{ color: isOn ? 'var(--green)' : 'var(--muted)', flexShrink:0 }} />
+                      <div style={{ flex:1 }}>
+                        <div style={{ fontSize:13, fontWeight:600, color: isOn ? 'var(--text)' : 'var(--muted)' }}>
+                          {label}
+                        </div>
+                        <div style={{ fontSize:11, color:'var(--muted)', marginTop:1 }}>{desc}</div>
+                      </div>
+                      <div style={{
+                        width:36, height:20, borderRadius:10, padding:2,
+                        background: isOn ? 'var(--green)' : 'rgba(255,255,255,0.1)',
+                        transition: 'background .2s',
+                        display:'flex', alignItems:'center',
+                      }}>
+                        <div style={{
+                          width:16, height:16, borderRadius:'50%', background:'#fff',
+                          transform: isOn ? 'translateX(16px)' : 'translateX(0)',
+                          transition: 'transform .2s',
+                          boxShadow: '0 1px 3px rgba(0,0,0,.3)',
+                        }} />
+                      </div>
+                    </div>
+                  )
+                })}
+                <div style={{ fontSize:11, color:'var(--muted)', paddingLeft:4 }}>
+                  点击切换开关。默认状态（蓝框）= 读取 config.yaml 配置
+                </div>
+              </div>
+            </div>
             {stratParams.length > 0 && (
               <div className="card mb-12">
                 <div className="card-header">策略参数</div>
@@ -277,7 +343,7 @@ export default function BacktestPage() {
               </div>
               <div style={{ display:'flex', flexWrap:'wrap', gap:'6px 16px' }}>
                 {[
-                  ['策略', form.strategy_name],
+                  ['策略', form.strategy_name === 'AUTO' ? '🤖 AUTO' : form.strategy_name],
                   ['品种', form.symbol],
                   ['周期', form.timeframe],
                   ['资金', `${form.initial_capital} U`],
@@ -500,6 +566,143 @@ export default function BacktestPage() {
           {/* 备注 */}
           {result.note && (
             <div className="alert alert-info mt-12">{result.note}</div>
+          )}
+
+          {/* V3.5: AUTO 模式 - 策略切换明细 */}
+          {result.is_auto_mode && result.strategy_switches?.length > 0 && (
+            <div className="card mt-16 mb-12">
+              <div className="card-header" style={{ display:'flex', alignItems:'center', gap:6 }}>
+                🔄 策略切换明细
+                <span style={{
+                  fontSize:11, padding:'1px 8px', borderRadius:10, marginLeft:8,
+                  background:'rgba(59,130,246,0.15)', color:'var(--blue)',
+                }}>{result.strategy_switches.length} 次切换</span>
+              </div>
+              <div style={{ overflowX:'auto', maxHeight:300, overflowY:'auto' }}>
+                <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                  <thead>
+                    <tr style={{ borderBottom:'1px solid rgba(255,255,255,0.08)' }}>
+                      {['时间', '切换方向', '市场状态', '置信度'].map(h => (
+                        <th key={h} style={{
+                          padding:'8px 12px', textAlign:'left',
+                          color:'var(--muted)', fontWeight:500, whiteSpace:'nowrap',
+                          position:'sticky', top:0, background:'var(--card-bg)',
+                        }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.strategy_switches.map((sw, idx) => (
+                      <tr key={idx} style={{
+                        borderBottom: idx < result.strategy_switches.length - 1
+                          ? '1px solid rgba(255,255,255,0.04)' : 'none',
+                      }}>
+                        <td style={{ padding:'7px 12px', color:'var(--muted)', whiteSpace:'nowrap', fontSize:11 }}>
+                          {sw.time?.slice(0,16)}
+                        </td>
+                        <td style={{ padding:'7px 12px', whiteSpace:'nowrap' }}>
+                          <span style={{ color:'var(--muted)' }}>{sw.from}</span>
+                          <span style={{ margin:'0 6px', color:'var(--blue)' }}>→</span>
+                          <span style={{ fontWeight:600, color:'var(--text)' }}>{sw.to}</span>
+                        </td>
+                        <td style={{ padding:'7px 12px' }}>
+                          <span style={{
+                            padding:'2px 8px', borderRadius:4, fontSize:11, fontWeight:600,
+                            background: sw.regime === 'bull' ? 'rgba(38,166,154,0.15)' :
+                                       sw.regime === 'bear' ? 'rgba(239,83,80,0.15)' :
+                                       sw.regime === 'breakout' ? 'rgba(255,193,7,0.15)' :
+                                       'rgba(255,255,255,0.06)',
+                            color: sw.regime === 'bull' ? 'var(--green)' :
+                                  sw.regime === 'bear' ? 'var(--red)' :
+                                  sw.regime === 'breakout' ? '#ffc107' : 'var(--muted)',
+                          }}>
+                            {sw.regime?.toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ padding:'7px 12px', fontWeight:600 }}>
+                          {(sw.confidence * 100).toFixed(0)}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* V3.5: AUTO 模式 - 各策略分别统计 */}
+          {result.is_auto_mode && result.per_strategy_stats && Object.keys(result.per_strategy_stats).length > 0 && (
+            <div className="card mb-12">
+              <div className="card-header">📊 各策略绩效对比</div>
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(180px, 1fr))', gap:10 }}>
+                {Object.entries(result.per_strategy_stats).map(([name, stats]) => (
+                  <div key={name} style={{
+                    padding:'12px 14px', borderRadius:8,
+                    background:'rgba(255,255,255,0.03)',
+                    border:'1px solid rgba(255,255,255,0.06)',
+                  }}>
+                    <div style={{ fontSize:13, fontWeight:700, marginBottom:6 }}>{name}</div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:3, fontSize:12 }}>
+                      <div>
+                        <span style={{ color:'var(--muted)' }}>交易数: </span>
+                        <span style={{ fontWeight:600 }}>{stats.total_trades}</span>
+                      </div>
+                      <div>
+                        <span style={{ color:'var(--muted)' }}>胜率: </span>
+                        <span style={{
+                          fontWeight:600,
+                          color: stats.win_rate_pct >= 50 ? 'var(--green)' : 'var(--red)',
+                        }}>{stats.win_rate_pct.toFixed(1)}%</span>
+                        <span style={{ color:'var(--muted)', fontSize:11 }}> ({stats.wins}W/{stats.losses}L)</span>
+                      </div>
+                      <div>
+                        <span style={{ color:'var(--muted)' }}>盈亏: </span>
+                        <span style={{
+                          fontWeight:600,
+                          color: stats.total_pnl >= 0 ? 'var(--green)' : 'var(--red)',
+                        }}>{stats.total_pnl >= 0 ? '+' : ''}{stats.total_pnl.toFixed(2)} U</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* V3.5: 高级功能启用标记 */}
+          {result.features && (
+            <div style={{
+              display:'flex', gap:8, marginBottom:12, flexWrap:'wrap',
+            }}>
+              {result.features.trailing_stop && (
+                <span style={{
+                  padding:'3px 10px', borderRadius:12, fontSize:11, fontWeight:600,
+                  background:'rgba(38,166,154,0.12)', color:'var(--green)',
+                  border:'1px solid rgba(38,166,154,0.25)',
+                }}>✅ 追踪止损</span>
+              )}
+              {result.features.time_stop && (
+                <span style={{
+                  padding:'3px 10px', borderRadius:12, fontSize:11, fontWeight:600,
+                  background:'rgba(59,130,246,0.12)', color:'var(--blue)',
+                  border:'1px solid rgba(59,130,246,0.25)',
+                }}>⏱️ 时间止损</span>
+              )}
+              {result.features.dynamic_pos && (
+                <span style={{
+                  padding:'3px 10px', borderRadius:12, fontSize:11, fontWeight:600,
+                  background:'rgba(255,193,7,0.12)', color:'#ffc107',
+                  border:'1px solid rgba(255,193,7,0.25)',
+                }}>📊 动态仓位</span>
+              )}
+              {result.is_auto_mode && (
+                <span style={{
+                  padding:'3px 10px', borderRadius:12, fontSize:11, fontWeight:600,
+                  background:'rgba(156,39,176,0.12)', color:'#ce93d8',
+                  border:'1px solid rgba(156,39,176,0.25)',
+                }}>🤖 AUTO 模式</span>
+              )}
+            </div>
           )}
 
           {/* 参数回显 */}

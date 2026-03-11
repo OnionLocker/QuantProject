@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
-import { botApi, dataApi } from '../api'
+import { botApi, dataApi, marketApi } from '../api'
 import {
   Play, Square, Zap, TrendingUp, TrendingDown,
   Minus, AlertTriangle, RefreshCw, Clock, Activity,
   DollarSign, BarChart2, ArrowUpRight, ArrowDownRight,
-  ChevronDown,
+  ChevronDown, Eye, Shield,
 } from 'lucide-react'
 
 export default function Dashboard({ username }) {
@@ -15,6 +15,7 @@ export default function Dashboard({ username }) {
   const [strategies, setStrategies] = useState([])
   const [selStrategy, setSelStrategy] = useState('AUTO')
   const [showStratMenu, setShowStratMenu] = useState(false)
+  const [sentiment,  setSentiment]  = useState(null)
   const stratMenuRef = useRef(null)
   const wsRef = useRef(null)
 
@@ -31,6 +32,13 @@ export default function Dashboard({ username }) {
 
     // 拉取策略列表
     dataApi.strategies().then(r => setStrategies(r.data || [])).catch(() => {})
+
+    // V3.0: 拉取市场情绪数据
+    const fetchSentiment = () => {
+      marketApi.sentiment().then(r => setSentiment(r.data)).catch(() => {})
+    }
+    fetchSentiment()
+    const sentimentTimer = setInterval(fetchSentiment, 60000)  // 每分钟更新
 
     fetchStatus()
     const t = setInterval(fetchStatus, 15000)
@@ -76,6 +84,7 @@ export default function Dashboard({ username }) {
     return () => {
       stopped = true
       clearInterval(t)
+      clearInterval(sentimentTimer)
       clearTimeout(reconnectTimer)
       if (ws) ws.close()
     }
@@ -132,8 +141,38 @@ export default function Dashboard({ username }) {
   const consLoss = d.consecutive_losses ?? bot.consecutive_losses ?? 0
   const hasPos   = posAmt > 0 && posSide && posSide !== 'unknown_rollback_failed'
 
+  // V3.0: Regime 数据
+  const regimeDetail = d.regime_detail || {}
+  const regime       = regimeDetail.regime || null
+  const regimeConf   = regimeDetail.confidence || 0
+  const inTransition = regimeDetail.in_transition || false
+
+  // V3.0: 资金费率数据
+  const fundingData = sentiment?.funding || regimeDetail.funding || null
+  const fundingRate = fundingData?.funding_rate
+  const fundingSignal = fundingData?.signal
+
+  // V3.0: OI 数据
+  const oiData = sentiment?.oi || regimeDetail.oi || null
+
   const pnlColor = (v) => v == null ? 'var(--muted)' : v >= 0 ? 'var(--green)' : 'var(--red)'
   const fmt      = (v, dec=2) => v == null ? '—' : Number(v).toFixed(dec)
+
+  // Regime 颜色映射
+  const regimeColors = {
+    bull: 'var(--green)', bear: 'var(--red)', ranging: 'var(--yellow)',
+    breakout: '#ff6b35', wait: 'var(--muted)', unknown: 'var(--muted2)',
+  }
+  const regimeLabels = {
+    bull: '🐂 牛市', bear: '🐻 熊市', ranging: '📊 震荡',
+    breakout: '🚀 突破', wait: '⏸️ 观望', unknown: '—',
+  }
+
+  // 资金费率格式化
+  const fmtFR = (rate) => {
+    if (rate == null) return '—'
+    return `${(rate * 100).toFixed(4)}%`
+  }
 
   return (
     <div>
@@ -370,6 +409,137 @@ export default function Dashboard({ username }) {
           )}
         </div>
       </div>
+
+      {/* ── V3.0: 市场状态面板 ── */}
+      {running && (
+        <div className="card mb-16">
+          <div className="card-header" style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <Activity size={14} />
+            市场状态 · V2.0
+            {regime && (
+              <span style={{
+                marginLeft:'auto', fontSize:12, fontWeight:700,
+                color: regimeColors[regime] || 'var(--muted)',
+                display:'flex', alignItems:'center', gap:6,
+              }}>
+                {regimeLabels[regime] || regime}
+                {regimeConf > 0 && (
+                  <span style={{ fontSize:10, fontWeight:400, color:'var(--muted)' }}>
+                    {(regimeConf * 100).toFixed(0)}%
+                  </span>
+                )}
+                {inTransition && (
+                  <span style={{
+                    fontSize:10, background:'var(--yellow)', color:'#000',
+                    padding:'1px 6px', borderRadius:3, fontWeight:600,
+                  }}>
+                    过渡期
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)' }}>
+            {/* 资金费率 */}
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>
+                <DollarSign size={10} style={{verticalAlign:'middle',marginRight:2}} />
+                资金费率
+              </div>
+              <div style={{
+                fontSize:15, fontWeight:700,
+                color: fundingRate != null
+                  ? fundingRate > 0.0003 ? 'var(--red)'
+                    : fundingRate < -0.0003 ? 'var(--green)'
+                    : 'var(--text)'
+                  : 'var(--muted2)'
+              }}>
+                {fmtFR(fundingRate)}
+              </div>
+              {fundingSignal && fundingSignal !== 'neutral' && (
+                <div style={{ fontSize:10, color:'var(--muted)', marginTop:2 }}>
+                  {fundingSignal === 'bearish' ? '📉 多头拥挤' : '📈 空头拥挤'}
+                </div>
+              )}
+            </div>
+            {/* OI */}
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>
+                <BarChart2 size={10} style={{verticalAlign:'middle',marginRight:2}} />
+                持仓量 (OI)
+              </div>
+              <div style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>
+                {oiData?.oi ? `${(oiData.oi / 1e6).toFixed(1)}M` : '—'}
+              </div>
+              {oiData?.signal && oiData.signal !== 'stable' && (
+                <div style={{
+                  fontSize:10, marginTop:2,
+                  color: oiData.signal === 'rising' ? 'var(--green)' : 'var(--red)',
+                }}>
+                  {oiData.signal === 'rising' ? '📈 上升' : '📉 下降'}
+                  {oiData.change_pct ? ` (${(oiData.change_pct * 100).toFixed(1)}%)` : ''}
+                </div>
+              )}
+            </div>
+            {/* 新闻情绪 */}
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>
+                <Eye size={10} style={{verticalAlign:'middle',marginRight:2}} />
+                新闻情绪
+              </div>
+              {sentiment?.news ? (
+                <>
+                  <div style={{
+                    fontSize:15, fontWeight:700,
+                    color: sentiment.news.combined_score > 0.2 ? 'var(--green)'
+                      : sentiment.news.combined_score < -0.2 ? 'var(--red)'
+                      : 'var(--text)',
+                  }}>
+                    {sentiment.news.combined_score > 0 ? '+' : ''}{sentiment.news.combined_score.toFixed(2)}
+                  </div>
+                  <div style={{ fontSize:10, color:'var(--muted)', marginTop:2 }}>
+                    {sentiment.news.age_minutes < 60
+                      ? `${Math.round(sentiment.news.age_minutes)}分钟前`
+                      : `${(sentiment.news.age_minutes / 60).toFixed(1)}小时前`}
+                    {sentiment.ai_available && ' · AI'}
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize:15, fontWeight:700, color:'var(--muted2)' }}>—</div>
+              )}
+            </div>
+            {/* 综合信号 */}
+            <div style={{ padding:'12px 16px' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>
+                <Shield size={10} style={{verticalAlign:'middle',marginRight:2}} />
+                综合信号
+              </div>
+              {regimeDetail.votes ? (
+                <>
+                  {/* 置信度条 */}
+                  <div style={{
+                    width:'100%', height:6, background:'var(--surface3)',
+                    borderRadius:3, overflow:'hidden', marginTop:8, marginBottom:4,
+                  }}>
+                    <div style={{
+                      width: `${Math.min(regimeConf * 100, 100)}%`,
+                      height:'100%', borderRadius:3,
+                      background: regimeConf > 0.7 ? 'var(--green)'
+                        : regimeConf > 0.4 ? 'var(--yellow)' : 'var(--red)',
+                      transition: 'width 0.5s ease',
+                    }} />
+                  </div>
+                  <div style={{ fontSize:10, color:'var(--muted)' }}>
+                    置信度 {(regimeConf * 100).toFixed(0)}%
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize:15, fontWeight:700, color:'var(--muted2)' }}>—</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── 持仓详情卡片 ── */}
       {hasPos && (

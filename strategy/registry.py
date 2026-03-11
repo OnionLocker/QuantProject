@@ -35,15 +35,23 @@ def get_strategy(name: str, **params) -> BaseStrategy:
 
 
 def list_strategies() -> list[dict]:
-    """返回所有已注册策略的名称、类名和可调参数元数据。"""
-    return [
+    """返回所有已注册策略的名称、类名和可调参数元数据。V3.5: 包含 AUTO 虚拟策略。"""
+    result = [
+        {
+            "name":   "AUTO",
+            "class":  "MarketRegimeSelector",
+            "params": [],   # AUTO 模式无可调参数，由 selector 自动管理
+        }
+    ]
+    result.extend(
         {
             "name":   k,
             "class":  v.__name__,
             "params": getattr(v, "PARAMS", []),
         }
         for k, v in _REGISTRY.items()
-    ]
+    )
+    return result
 
 
 def get_strategy_params(name: str) -> list[dict]:

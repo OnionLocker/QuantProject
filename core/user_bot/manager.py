@@ -116,6 +116,31 @@ def bot_status(user_id: int) -> dict:
     }
 
 
+# ── V2.0: 获取用户的 selector 实例（供 API 读取 regime 详情）─────────────────
+
+# 运行中的 selector 缓存（由 runner.py 在 AUTO 模式下注册）
+_user_selectors: Dict[int, object] = {}
+_selector_lock = threading.Lock()
+
+
+def register_user_selector(user_id: int, selector):
+    """runner.py 在 AUTO 模式下调用，注册 selector 实例。"""
+    with _selector_lock:
+        _user_selectors[user_id] = selector
+
+
+def unregister_user_selector(user_id: int):
+    """Bot 停止时清理。"""
+    with _selector_lock:
+        _user_selectors.pop(user_id, None)
+
+
+def get_user_selector(user_id: int):
+    """API 层调用，获取运行中的 selector 实例。"""
+    with _selector_lock:
+        return _user_selectors.get(user_id)
+
+
 # ── Watchdog：Bot 意外崩溃后自动重启（带指数退避）────────────────────────────
 
 def _get_notifier_for_user(user_id: int, username: str):

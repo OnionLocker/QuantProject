@@ -90,7 +90,7 @@ def get_backtest_options():
 
 
 class BacktestBody(BaseModel):
-    strategy_name:    str   = ""      # 空则读用户DB配置，再 fallback config.yaml
+    strategy_name:    str   = ""      # 空则读用户DB配置，"AUTO" 启用自动选择器
     symbol:           str   = ""
     timeframe:        str   = ""
     start_date:       str   = ""
@@ -103,6 +103,10 @@ class BacktestBody(BaseModel):
     slippage:         float = 0.0
     # 策略层参数（key-value，透传给策略 __init__）
     strategy_params:  dict  = {}
+    # V3.5: 高级功能开关（None = 读 config.yaml 默认值）
+    trailing_stop:    Optional[bool] = None
+    time_stop:        Optional[bool] = None
+    dynamic_pos:      Optional[bool] = None
 
 
 @router.post("/backtest/run", summary="触发回测（后台异步执行）")
@@ -146,6 +150,9 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
             fee_rate = body.fee_rate or bc.get("taker_fee_rate", 0.0005)
             slippage = body.slippage or 0.0002
 
+            # V3.5: AUTO 模式 - 传字符串给引擎
+            is_auto = strategy_name.upper() == "AUTO"
+
             # 策略参数：请求体 > 用户DB > config.yaml
             strategy_params = (
                 body.strategy_params or
@@ -153,7 +160,10 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
                 sc.get("params", {})
             )
 
-            strategy = get_strategy(strategy_name, **strategy_params)
+            if is_auto:
+                strategy = "AUTO"   # 引擎识别字符串 "AUTO" 启用 selector
+            else:
+                strategy = get_strategy(strategy_name, **strategy_params)
 
             # 进度回调：引擎每完成 10% K线更新一次内存状态
             def _progress_cb(pct: int):
@@ -171,6 +181,10 @@ def run_backtest(body: BacktestBody, user=Depends(get_current_user)):
                 risk_pct        = risk_pct,
                 fee_rate        = fee_rate,
                 slippage        = slippage,
+                # V3.5 新增参数
+                trailing_stop   = body.trailing_stop,
+                time_stop       = body.time_stop,
+                dynamic_pos     = body.dynamic_pos,
                 silent          = True,
                 progress_cb     = _progress_cb,
             )

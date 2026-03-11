@@ -33,23 +33,23 @@ class PriceActionSetups(BaseStrategy):
     PARAMS = [
         {
             "key": "rr1", "label": "止盈倍数 (TP1)",
-            "type": "float", "default": 2.0, "min": 1.0, "max": 5.0, "step": 0.5,
-            "tip": "止盈 = 入场价 ± 止损距离 × 倍数",
+            "type": "float", "default": 1.5, "min": 1.0, "max": 5.0, "step": 0.5,
+            "tip": "止盈 = 入场价 ± 止损距离 × 倍数（BTC 1h 推荐 1.5，太大则持仓时间过长）",
         },
         {
             "key": "ema_period", "label": "EMA 周期",
-            "type": "int", "default": 20, "min": 5, "max": 50, "step": 1,
-            "tip": "S2/S3 趋势过滤均线",
+            "type": "int", "default": 14, "min": 5, "max": 50, "step": 1,
+            "tip": "S2/S3 趋势过滤均线（BTC 1h 推荐 14，响应更快）",
         },
         {
             "key": "trend_bars", "label": "趋势判断周期",
-            "type": "int", "default": 20, "min": 10, "max": 50, "step": 5,
-            "tip": "S3: 趋势判断回看K线数",
+            "type": "int", "default": 14, "min": 10, "max": 50, "step": 5,
+            "tip": "S3: 趋势判断回看K线数（BTC 1h 推荐 14 ≈ 半天+）",
         },
         {
             "key": "spring_bars", "label": "前高/低回看周期",
-            "type": "int", "default": 20, "min": 10, "max": 50, "step": 5,
-            "tip": "S5: 寻找近期高低点的窗口",
+            "type": "int", "default": 14, "min": 10, "max": 50, "step": 5,
+            "tip": "S5: 寻找近期高低点的窗口（BTC 1h 推荐 14）",
         },
         {
             "key": "atr_period", "label": "ATR 周期",
@@ -58,25 +58,25 @@ class PriceActionSetups(BaseStrategy):
         },
         {
             "key": "cooldown", "label": "信号冷却期（K线数）",
-            "type": "int", "default": 8, "min": 3, "max": 20, "step": 1,
-            "tip": "两次信号之间最少间隔多少根K线，避免过度交易",
+            "type": "int", "default": 5, "min": 3, "max": 20, "step": 1,
+            "tip": "两次信号之间最少间隔多少根K线（BTC 1h 推荐 5 ≈ 5小时）",
         },
         {
             "key": "direction", "label": "交易方向",
-            "type": "str", "default": "long",
+            "type": "str", "default": "both",
             "tip": "long=只做多, short=只做空, both=双向",
         },
     ]
 
     def __init__(
         self,
-        rr1:         float = 2.0,
-        ema_period:  int   = 20,
-        trend_bars:  int   = 20,
-        spring_bars: int   = 20,
+        rr1:         float = 1.5,
+        ema_period:  int   = 14,
+        trend_bars:  int   = 14,
+        spring_bars: int   = 14,
         atr_period:  int   = 14,
-        cooldown:    int   = 8,
-        direction:   str   = "long",
+        cooldown:    int   = 5,
+        direction:   str   = "both",
     ):
         super().__init__(name="PA_5Setups_双向价格行为")
         self.rr1         = rr1

@@ -29,8 +29,8 @@ class TrendBullStrategy(BaseStrategy):
     PARAMS = [
         {
             "key": "ema_fast", "label": "快速EMA周期",
-            "type": "int", "default": 9, "min": 5, "max": 30, "step": 1,
-            "tip": "快线，用于金叉/死叉信号",
+            "type": "int", "default": 8, "min": 5, "max": 30, "step": 1,
+            "tip": "快线，用于金叉/死叉信号（BTC 1h 推荐 8，更灵敏）",
         },
         {
             "key": "ema_slow", "label": "慢速EMA周期",
@@ -39,8 +39,8 @@ class TrendBullStrategy(BaseStrategy):
         },
         {
             "key": "ema_trend", "label": "趋势EMA周期",
-            "type": "int", "default": 50, "min": 30, "max": 200, "step": 10,
-            "tip": "大趋势参考线，价格在此上方才开多",
+            "type": "int", "default": 40, "min": 20, "max": 200, "step": 10,
+            "tip": "大趋势参考线（BTC 1h 推荐 40 ≈ 不到2天，比 50 更灵敏）",
         },
         {
             "key": "adx_period", "label": "ADX周期",
@@ -49,8 +49,8 @@ class TrendBullStrategy(BaseStrategy):
         },
         {
             "key": "adx_threshold", "label": "ADX阈值",
-            "type": "int", "default": 25, "min": 15, "max": 40, "step": 5,
-            "tip": "趋势强度阈值，越高越严格",
+            "type": "int", "default": 22, "min": 15, "max": 40, "step": 5,
+            "tip": "趋势强度阈值（BTC 1h 推荐 22，加密市场 ADX 普遍偏低）",
         },
         {
             "key": "rsi_period", "label": "RSI周期",
@@ -64,8 +64,8 @@ class TrendBullStrategy(BaseStrategy):
         },
         {
             "key": "rsi_os", "label": "RSI超卖线",
-            "type": "int", "default": 35, "min": 20, "max": 50, "step": 5,
-            "tip": "RSI低于此值视为超卖（回调买点）",
+            "type": "int", "default": 38, "min": 20, "max": 50, "step": 5,
+            "tip": "RSI低于此值视为超卖（BTC 1h 推荐 38，牛市回调不会太深）",
         },
         {
             "key": "atr_period", "label": "ATR周期",
@@ -74,35 +74,35 @@ class TrendBullStrategy(BaseStrategy):
         },
         {
             "key": "atr_sl_mult", "label": "ATR止损倍数",
-            "type": "float", "default": 1.5, "min": 1.0, "max": 3.0, "step": 0.5,
-            "tip": "止损 = 入场价 ± ATR × 倍数",
+            "type": "float", "default": 1.2, "min": 0.5, "max": 3.0, "step": 0.1,
+            "tip": "止损 = 入场价 ± ATR × 倍数（BTC 1h 推荐 1.2，止损更紧凑）",
         },
         {
             "key": "rr1", "label": "止盈倍数 (TP1)",
-            "type": "float", "default": 2.0, "min": 1.0, "max": 5.0, "step": 0.5,
-            "tip": "TP1 = 入场价 ± 止损距离 × 倍数",
+            "type": "float", "default": 1.5, "min": 1.0, "max": 5.0, "step": 0.5,
+            "tip": "TP1 = 入场价 ± 止损距离 × 倍数（BTC 1h 推荐 1.5，加快止盈）",
         },
         {
             "key": "cooldown", "label": "信号冷却期",
-            "type": "int", "default": 6, "min": 3, "max": 20, "step": 1,
-            "tip": "两次信号之间最少间隔K线数",
+            "type": "int", "default": 4, "min": 3, "max": 20, "step": 1,
+            "tip": "两次信号之间最少间隔K线数（BTC 1h 推荐 4 ≈ 4小时）",
         },
     ]
 
     def __init__(
         self,
-        ema_fast:      int   = 9,
+        ema_fast:      int   = 8,
         ema_slow:      int   = 21,
-        ema_trend:     int   = 50,
+        ema_trend:     int   = 40,
         adx_period:    int   = 14,
-        adx_threshold: int   = 25,
+        adx_threshold: int   = 22,
         rsi_period:    int   = 14,
         rsi_ob:        int   = 70,
-        rsi_os:        int   = 35,
+        rsi_os:        int   = 38,
         atr_period:    int   = 14,
-        atr_sl_mult:   float = 1.5,
-        rr1:           float = 2.0,
-        cooldown:      int   = 6,
+        atr_sl_mult:   float = 1.2,
+        rr1:           float = 1.5,
+        cooldown:      int   = 4,
     ):
         super().__init__(name="BULL_趋势跟踪牛市策略")
         self.ema_fast      = ema_fast
