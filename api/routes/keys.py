@@ -132,6 +132,7 @@ def live_balance(user=Depends(get_current_user)):
     """直接调用 OKX 接口获取最新 USDT 余额，不依赖数据库历史记录。
     优先读合约账户（swap），fallback 现货账户。
     """
+    import ccxt
     ex = get_user_exchange(user["id"])
     try:
         # OKX 合约账户余额（永续合约用这个）
@@ -160,6 +161,10 @@ def live_balance(user=Depends(get_current_user)):
             "used":         round(float(used),  4),
             "account_type": "swap",
         }
+    except ccxt.AuthenticationError:
+        raise HTTPException(status_code=400, detail="OKX 认证失败：请检查 API Key / Secret / Passphrase，以及模拟盘开关是否正确")
+    except ccxt.NetworkError as e:
+        raise HTTPException(status_code=502, detail=f"连接 OKX 失败：{e}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"获取余额失败：{e}")
 

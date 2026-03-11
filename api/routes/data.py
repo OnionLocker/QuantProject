@@ -61,10 +61,17 @@ def get_trades(limit: int = 50, user=Depends(get_current_user)):
 @router.get("/balance", summary="我的每日余额历史")
 def get_balance(limit: int = 90, user=Depends(get_current_user)):
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT date, balance FROM daily_balance WHERE user_id=? ORDER BY date DESC LIMIT ?",
-        (user["id"], limit)
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT date, balance FROM daily_balance WHERE user_id=? ORDER BY date DESC LIMIT ?",
+            (user["id"], limit)
+        ).fetchall()
+    except Exception:
+        # 兼容旧版单用户表结构（无 user_id 列）
+        rows = conn.execute(
+            "SELECT date, balance FROM daily_balance ORDER BY date DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
     return [{"date": r[0], "balance": r[1]} for r in rows]
 
 
