@@ -153,6 +153,12 @@ class TrendBearStrategy(BaseStrategy):
         dx        = (100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan))
         df['adx'] = dx.ewm(alpha=1/self.adx_period, adjust=False).mean()
 
+        # V4.0: 成交量均线（用于突破信号的量能确认）
+        if 'volume' in df.columns:
+            df['vol_ma'] = df['volume'].rolling(20).mean()
+        else:
+            df['vol_ma'] = np.nan
+
         return df
 
     def precompute(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -169,6 +175,14 @@ class TrendBearStrategy(BaseStrategy):
         C   = df['close'].values
         O   = df['open'].values
         n   = len(df)
+
+        # V4.0: 成交量确认
+        has_vol = 'volume' in df.columns and not df['vol_ma'].isna().all()
+        if has_vol:
+            VOL    = df['volume'].values
+            VOL_MA = df['vol_ma'].values
+        else:
+            VOL = VOL_MA = np.zeros(n)
 
         actions = ['HOLD'] * n
         sig_sl  = np.zeros(n)
@@ -187,10 +201,14 @@ class TrendBearStrategy(BaseStrategy):
             sl_dist  = ATR[j] * self.atr_sl_mult
             trending = ADX[j] > self.adx_threshold
 
+            # V4.0: 成交量比率
+            vol_ratio = VOL[j] / VOL_MA[j] if has_vol and VOL_MA[j] > 0 else 1.0
+
             # ── S1: EMA死叉 + ADX趋势确认 + 价格在趋势线下 ──────────────────
+            # V4.0: 死叉信号需量能确认（vol_ratio > 0.8）
             if (j >= 1 and trending and
                     EF[j] < ES[j] and EF[j-1] >= ES[j-1] and
-                    C[j] < ET[j]):
+                    C[j] < ET[j] and vol_ratio > 0.8):
                 actions[i] = 'SELL'
                 sl = C[j] + sl_dist
                 sig_sl[i]  = sl
@@ -214,12 +232,13 @@ class TrendBearStrategy(BaseStrategy):
                 continue
 
             # ── S3: 跌破近期低点 + 动量强劲 ─────────────────────────────────
+            # V4.0: 突破信号需放量确认（vol_ratio > 1.2）
             if j >= 20:
                 recent_low = np.min(L[j-20:j])
                 if (C[j] < recent_low and
                         C[j] < O[j] and
                         (O[j] - C[j]) > ATR[j] * 0.8 and
-                        C[j] < ET[j]):
+                        C[j] < ET[j] and vol_ratio > 1.2):
                     actions[i] = 'SELL'
                     sl = recent_low + ATR[j] * 0.5
                     sig_sl[i]  = sl
@@ -230,9 +249,10 @@ class TrendBearStrategy(BaseStrategy):
                     continue
 
             # ── B1: 金叉反转（保护性做多）────────────────────────────────────
+            # V4.0: 金叉需量能确认（vol_ratio > 0.8）
             if (j >= 1 and
                     EF[j] > ES[j] and EF[j-1] <= ES[j-1] and
-                    C[j] > ET[j] and trending):
+                    C[j] > ET[j] and trending and vol_ratio > 0.8):
                 actions[i] = 'BUY'
                 sl = C[j] - sl_dist
                 sig_sl[i]  = sl
@@ -295,13 +315,23 @@ class TrendBearStrategy(BaseStrategy):
         trending = ADX[j] > self.adx_threshold
         entry    = df['open'].iloc[-1]
 
-        if (j >= 1 and trending and EF[j] < ES[j] and EF[j-1] >= ES[j-1] and C[j] < ET[j]):
+        # V4.0: 成交量比率
+        vol_ratio = 1.0
+        if 'volume' in df.columns and 'vol_ma' in df.columns:
+            vol_ma_val = df['vol_ma'].values[j]
+            if not np.isnan(vol_ma_val) and vol_ma_val > 0:
+                vol_ratio = df['volume'].values[j] / vol_ma_val
+
+        # S1 (V4.0: +量能确认 vol_ratio > 0.8)
+        if (j >= 1 and trending and EF[j] < ES[j] and EF[j-1] >= ES[j-1]
+                and C[j] < ET[j] and vol_ratio > 0.8):
             sl = C[j] + sl_dist
             sig.update({"action": "SELL", "entry": entry, "sl": sl,
                         "tp1": entry - sl_dist * self.rr1,
                         "tp2": entry - sl_dist * self.rr1 * 2,
                         "reason": "🔴 S1: EMA死叉趋势启动"})
             return sig
+        # S2
         if (trending and EF[j] < ET[j] and H[j] >= EF[j] * 0.995 and C[j] < EF[j] and
                 j >= 1 and RSI[j] < RSI[j-1] and RSI[j-1] > self.rsi_ob):
             sl = H[j] + ATR[j] * 0.5
@@ -311,10 +341,12 @@ class TrendBearStrategy(BaseStrategy):
                         "tp2": entry - risk * self.rr1 * 2,
                         "reason": "🔴 S2: 趋势反弹EMA超买回落"})
             return sig
+        # S3 (V4.0: +放量确认 vol_ratio > 1.2)
         if j >= 20:
             recent_low = np.min(L[j-20:j])
             if (C[j] < recent_low and C[j] < O[j] and
-                    (O[j] - C[j]) > ATR[j] * 0.8 and C[j] < ET[j]):
+                    (O[j] - C[j]) > ATR[j] * 0.8 and C[j] < ET[j]
+                    and vol_ratio > 1.2):
                 sl = recent_low + ATR[j] * 0.5
                 risk = abs(sl - entry)
                 sig.update({"action": "SELL", "entry": entry, "sl": sl,
@@ -322,13 +354,16 @@ class TrendBearStrategy(BaseStrategy):
                             "tp2": entry - risk * self.rr1 * 2,
                             "reason": "🔴 S3: 动量跌破近期低点"})
                 return sig
-        if (j >= 1 and EF[j] > ES[j] and EF[j-1] <= ES[j-1] and C[j] > ET[j] and trending):
+        # B1 (V4.0: +量能确认 vol_ratio > 0.8)
+        if (j >= 1 and EF[j] > ES[j] and EF[j-1] <= ES[j-1]
+                and C[j] > ET[j] and trending and vol_ratio > 0.8):
             sl = C[j] - sl_dist
             sig.update({"action": "BUY", "entry": entry, "sl": sl,
                         "tp1": entry + sl_dist * self.rr1,
                         "tp2": entry + sl_dist * self.rr1 * 2,
                         "reason": "🟢 B1: EMA金叉趋势反转"})
             return sig
+        # B2
         if (j >= 1 and RSI[j-1] < self.rsi_os and C[j] > EF[j] and C[j-1] <= EF[j-1]):
             sl = L[j] - ATR[j] * 0.5
             risk = abs(entry - sl)

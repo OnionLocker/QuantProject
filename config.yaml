@@ -37,7 +37,12 @@ selector:
   news_max_age_min: 120        # 新闻数据超过此分钟数则忽略
 
   # 防抖：连续 N 轮确认才切换策略（避免频繁抖动）
-  confirm_bars:     3
+  confirm_bars:     3             # 默认确认根数（兼容旧配置）
+  # V3.0: 动态确认根数（根据置信度自适应）
+  confirm_bars_fast:    2         # 高置信度时只需 2 根确认（抓住快速行情）
+  confirm_bars_slow:    4         # 低置信度时需要 4 根确认（过滤假信号）
+  confirm_fast_thresh:  0.7       # 置信度 > 此值走快速通道
+  confirm_slow_thresh:  0.4       # 置信度 < 此值走慢速通道
 
   # 各 regime 对应的策略名（必须在注册表中存在）
   strategy_bull:    "BULL"
@@ -52,6 +57,28 @@ selector:
   funding_extreme:    0.0005         # 极端资金费率阈值（>0.05%=极端）
   oi_spike_pct:       0.10           # OI 变化幅度阈值（>10%=异常）
   dynamic_news_weight: true          # 启用动态新闻权重（根据数据质量自动调整）
+
+  # V3.0: 资金费率否决权（极端费率时强制 WAIT，保护性机制）
+  funding_veto_enable: true           # 是否启用否决权
+  funding_veto_mult:   2.0            # 费率 > extreme × 此倍数时触发（即 >0.1%）
+  funding_veto_contra: true           # 只在费率与技术面方向冲突时否决（更精准）
+
+  # V4.0: 多时间框架确认（MTF - 机构级 top-down analysis）
+  mtf_enable:        true             # 是否启用 4h 级别方向过滤
+  mtf_ema_period:    50               # 4h 级别 EMA 周期
+  mtf_weight:        0.15             # MTF 在加权投票中的占比
+
+  # V4.0: VWAP 偏离度（均值回归压力评估）
+  vwap_period:       20               # VWAP 计算周期
+  vwap_deviation_pct: 0.02            # 偏离 >2% 视为极端，趋势信号打折
+
+  # V4.0: 动态否决权阈值（基于近期费率分布自适应）
+  dynamic_veto_enable:  true          # 是否用动态百分位替代固定阈值
+  dynamic_veto_pctile:  90            # 取近期费率绝对值的 90th 百分位
+
+  # V4.0: 信号质量评分阈值
+  signal_quality_full:  60            # >= 此分满仓
+  signal_quality_half:  40            # >= 此分半仓，< 此分不开仓
 
   # 各策略的参数覆盖（BTC/USDT 1h 优化后的默认参数）
   # 如果不填则使用策略代码里的默认值，两者现在已经同步
@@ -77,10 +104,16 @@ selector:
     RANGE:
       bb_period:     20
       bb_std:        2.0
-      rsi_ob:        65
-      rsi_os:        35
-      atr_sl_mult:   0.8        # 震荡策略止损更紧（旧值 1.0）
-      cooldown:      4
+      squeeze_pct:   0.04             # 布林带宽度 < 4% 判定收缩
+      squeeze_lookback: 10            # 回看 10 根内是否有收缩
+      range_lookback:   20            # 区间高低点回看周期
+      adx_rise_thresh:  2.0           # ADX 上升幅度确认趋势启动
+      vol_mult:      1.3              # 突破成交量倍数
+      body_ratio_min: 55.0            # 突破K线实体占比
+      atr_sl_mult:   1.0              # 止损距离（比旧版宽一点，突破策略需要更大空间）
+      rr1:           1.5              # 止盈1倍数
+      rr2:           3.0              # 止盈2倍数
+      cooldown:      6                # 冷却期加长（突破后给行情发展空间）
     BIG_CANDLE:
       body_pct:      1.2        # 大阳线阈值降低（旧值 1.5，低波动期难触发）
       vol_mult:      1.3        # 量能要求稍放松
@@ -122,4 +155,17 @@ risk_v25:
 
   # 动态仓位（根据 regime 置信度和策略胜率调整）
   dynamic_position_enable: true       # 是否启用动态仓位
+
+  # V4.0: 回撤保护（分级触发：警告/减仓/熔断）
+  drawdown_warning_pct: 0.03          # 3% 回撤 → 警告（仓位 75%）
+  drawdown_reduce_pct:  0.05          # 5% 回撤 → 减仓（仓位 50%）
+  drawdown_halt_pct:    0.08          # 8% 回撤 → 熔断（停止交易）
+
+  # V4.0: Equity Curve Trading（资金曲线跌破均线时降权）
+  equity_curve_enable:    true        # 是否启用 Equity Curve Trading
+  equity_ema_period:      10          # 资金曲线 EMA 周期
+  equity_below_ema_scale: 0.6         # 低于 EMA 时仓位缩放至 60%
+
+  # V4.0: 每日最大交易次数限制（防止过度交易）
+  max_daily_trades:  8                # 每日最多开仓 8 次
 

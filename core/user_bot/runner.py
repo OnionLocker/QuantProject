@@ -864,11 +864,135 @@ def run_user_bot(bot_state, override_strategy: str = None):
             if use_auto and selector is not None:
                 new_strategy, regime_result = selector.get_strategy(df, SYMBOL)
 
+                # V4.0: 风控 Regime 感知 — 每轮更新 regime 上下文
+                rm.set_regime_context(
+                    regime_result.get("regime", "unknown"),
+                    regime_result.get("confidence", 0.5),
+                    regime_result.get("transition_action"),
+                )
+
+                # V4.0: Regime 切换旧仓管理 — 方向性切换时平掉旧仓
+                _transition_action = regime_result.get("transition_action")
+                _transition_urgency = regime_result.get("transition_urgency", 0.0)
+                if _transition_action and state["position_amount"] > 0:
+                    is_long = state["position_side"] == "long"
+                    should_close = False
+                    if _transition_action == "close_long" and is_long:
+                        should_close = True
+                    elif _transition_action == "close_short" and not is_long:
+                        should_close = True
+                    elif _transition_action == "tighten_sl":
+                        # 收紧止损：将 SL 移近 50%
+                        if state["active_sl"] > 0 and state["entry_price"] > 0:
+                            old_sl = state["active_sl"]
+                            entry = state["entry_price"]
+                            if is_long:
+                                new_sl = old_sl + abs(entry - old_sl) * 0.5
+                                if new_sl > old_sl:
+                                    close_side_t = "sell"
+                                    pos_side_t = "long"
+                                    _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
+                                    sl_ord = _place_algo(ex, SYMBOL, close_side_t, state["position_amount"],
+                                                         new_sl, pos_side_t, "sl")
+                                    tp_price = state.get("active_tp1", 0)
+                                    tp_ord = None
+                                    if tp_price > 0:
+                                        tp_ord = _place_algo(ex, SYMBOL, close_side_t, state["position_amount"],
+                                                             tp_price, pos_side_t, "tp")
+                                    state["active_sl"] = new_sl
+                                    state["exchange_order_ids"] = {
+                                        "sl_order": sl_ord.get("id") if sl_ord else None,
+                                        "tp_order": tp_ord.get("id") if tp_ord else None,
+                                    }
+                                    _save_state(user_id, state)
+                                    logger.info(f"{tag} ⚡ Regime切换收紧SL: {old_sl:.2f} → {new_sl:.2f}")
+                            else:
+                                new_sl = old_sl - abs(old_sl - entry) * 0.5
+                                if new_sl < old_sl:
+                                    close_side_t = "buy"
+                                    pos_side_t = "short"
+                                    _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
+                                    sl_ord = _place_algo(ex, SYMBOL, close_side_t, state["position_amount"],
+                                                         new_sl, pos_side_t, "sl")
+                                    tp_price = state.get("active_tp1", 0)
+                                    tp_ord = None
+                                    if tp_price > 0:
+                                        tp_ord = _place_algo(ex, SYMBOL, close_side_t, state["position_amount"],
+                                                             tp_price, pos_side_t, "tp")
+                                    state["active_sl"] = new_sl
+                                    state["exchange_order_ids"] = {
+                                        "sl_order": sl_ord.get("id") if sl_ord else None,
+                                        "tp_order": tp_ord.get("id") if tp_ord else None,
+                                    }
+                                    _save_state(user_id, state)
+                                    logger.info(f"{tag} ⚡ Regime切换收紧SL: {old_sl:.2f} → {new_sl:.2f}")
+
+                    if should_close:
+                        close_side_r = "sell" if is_long else "buy"
+                        pos_side_r = "long" if is_long else "short"
+                        _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
+
+                        close_params = {"tdMode": "cross", "reduceOnly": True}
+                        if cached_pos_mode == "hedge":
+                            close_params["posSide"] = pos_side_r
+
+                        try:
+                            order = ex.create_order(
+                                SYMBOL, "market", close_side_r,
+                                state["position_amount"], params=close_params
+                            )
+                            fill_price = float(order.get("average") or order.get("price") or current_price)
+                            entry_r = state["entry_price"]
+                            gross = (
+                                (fill_price - entry_r) if is_long
+                                else (entry_r - fill_price)
+                            ) * state["position_amount"] * CONTRACT_SIZE
+                            close_fee = state["position_amount"] * CONTRACT_SIZE * fill_price * FEE_RATE
+                            net_pnl = gross - (state["open_fee"] + close_fee)
+
+                            record_trade(user_id, close_side_r, fill_price,
+                                         state["position_amount"], SYMBOL, "平仓",
+                                         net_pnl, f"Regime切换: {_transition_action}")
+                            _record_strategy_performance(
+                                user_id, state.get("strategy_name", ""), net_pnl
+                            )
+                            usdt_free = _get_swap_usdt(ex)
+                            rm.notify_trade_result(net_pnl, usdt_free)
+                            _save_risk_state(user_id, rm)
+
+                            pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
+                            _side_label = "多" if is_long else "空"
+                            logger.info(
+                                f"{tag} ⚡ Regime切换平仓: {_transition_action}, "
+                                f"净盈亏={net_pnl:+.2f}U, 紧急度={_transition_urgency:.2f}"
+                            )
+                            notify(
+                                f"{pnl_emoji} <b>{username} Regime切换平仓</b>\n"
+                                f"品种: {SYMBOL} | 方向: {_side_label}\n"
+                                f"入场价: {entry_r:.2f} → 出场价: {fill_price:.2f}\n"
+                                f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
+                                f"操作: {_transition_action} | 紧急度: {_transition_urgency:.0%}"
+                            )
+                            _clear_state(user_id)
+                            state = _load_state(user_id)
+                        except Exception as e:
+                            logger.error(f"{tag} ⚠️ Regime切换平仓失败: {e}")
+                            notify(
+                                f"⚠️ <b>{username} Regime切换平仓失败</b>\n"
+                                f"操作: {_transition_action}\n错误: {str(e)[:200]}"
+                            )
+
                 # V1.5: WAIT 观望状态 → 空仓时跳过本轮，有仓位继续监控
                 if regime_result.get("regime") == "wait" and state["position_amount"] == 0:
                     logger.info(
                         f"{tag} 📋 WAIT 观望，跳过开仓 ({regime_result['reason']})"
                     )
+                    stop_ev.wait(INTERVAL)
+                    continue
+
+                # V4.0: 日内交易次数检查（开仓前判断）
+                if rm.daily_trades_exhausted and state["position_amount"] == 0:
+                    logger.info(f"{tag} 📋 日内交易次数已达上限，跳过开仓")
                     stop_ev.wait(INTERVAL)
                     continue
 
@@ -894,7 +1018,8 @@ def run_user_bot(bot_state, override_strategy: str = None):
                             f"市场状态: {regime_result['regime'].upper()}\n"
                             f"技术面: {regime_result['tech_regime']} | "
                             f"新闻面: {regime_result['news_regime']}\n"
-                            f"置信度: {regime_result['confidence']:.0%}"
+                            f"置信度: {regime_result['confidence']:.0%}\n"
+                            f"信号质量: {regime_result.get('signal_quality', 0):.0f}/100"
                         )
             signal    = strategy.generate_signal(df)
             action    = signal["action"]
@@ -917,18 +1042,35 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     stop_ev.wait(INTERVAL)
                     continue
 
-                contracts = int(math.floor(usdt_free * RISK_PCT / risk_per))
+                # V4.0: 使用动态风险比例（综合回撤/equity curve/regime/Kelly）
+                effective_risk = rm.get_effective_risk_pct(RISK_PCT)
+                contracts = int(math.floor(usdt_free * effective_risk / risk_per))
 
-                # V2.5: 动态仓位 - 根据 regime 置信度调整
+                if effective_risk != RISK_PCT:
+                    logger.info(
+                        f"{tag} 📊 动态风险: base={RISK_PCT*100:.2f}% → "
+                        f"effective={effective_risk*100:.2f}% "
+                        f"(回撤×{rm.drawdown_scale:.2f} "
+                        f"equity×{rm.equity_curve_scale:.2f} "
+                        f"regime×{rm.regime_scale:.2f})"
+                    )
+
+                # V4.0: 信号质量仓位缩放
                 if DYNAMIC_POSITION_ENABLE and use_auto and selector is not None:
-                    regime_conf = getattr(selector, 'last_regime_detail', {}).get('confidence', 1.0)
-                    # 置信度高 (>0.7) → 全仓，低 (0.3~0.7) → 按比例缩减
-                    if regime_conf < 0.7:
-                        conf_scale = max(0.4, regime_conf / 0.7)
-                        contracts = max(1, int(contracts * conf_scale))
+                    signal_quality = getattr(selector, '_signal_quality_score', 100)
+                    if signal_quality < 40:
+                        # 低质量信号不开仓
                         logger.info(
-                            f"{tag} 📊 动态仓位: 置信度={regime_conf:.2f} "
-                            f"缩放={conf_scale:.2f} → {contracts} 张"
+                            f"{tag} 📊 信号质量={signal_quality:.0f} < 40，跳过开仓"
+                        )
+                        stop_ev.wait(INTERVAL)
+                        continue
+                    elif signal_quality < 60:
+                        # 中等质量：半仓
+                        sq_scale = max(0.4, signal_quality / 100.0)
+                        contracts = max(1, int(contracts * sq_scale))
+                        logger.info(
+                            f"{tag} 📊 信号质量={signal_quality:.0f}，仓位缩放={sq_scale:.2f} → {contracts} 张"
                         )
 
                     # V2.5: 策略绩效降权 - 最近胜率低的策略减仓

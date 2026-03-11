@@ -162,6 +162,12 @@ class TrendBullStrategy(BaseStrategy):
         dx        = (100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan))
         df['adx'] = dx.ewm(alpha=1/self.adx_period, adjust=False).mean()
 
+        # V4.0: 成交量均线（用于突破信号的量能确认）
+        if 'volume' in df.columns:
+            df['vol_ma'] = df['volume'].rolling(20).mean()
+        else:
+            df['vol_ma'] = np.nan
+
         return df
 
     # ── 预计算（回测高性能路径）──────────────────────────────────────────────
@@ -181,6 +187,14 @@ class TrendBullStrategy(BaseStrategy):
         O   = df['open'].values
         n   = len(df)
 
+        # V4.0: 成交量确认
+        has_vol = 'volume' in df.columns and not df['vol_ma'].isna().all()
+        if has_vol:
+            VOL    = df['volume'].values
+            VOL_MA = df['vol_ma'].values
+        else:
+            VOL = VOL_MA = np.zeros(n)
+
         actions = ['HOLD'] * n
         sig_sl  = np.zeros(n)
         sig_tp1 = np.zeros(n)
@@ -198,10 +212,14 @@ class TrendBullStrategy(BaseStrategy):
             sl_dist = ATR[j] * self.atr_sl_mult
             trending = ADX[j] > self.adx_threshold
 
+            # V4.0: 计算成交量比率（用于 B1/B3/S1 过滤）
+            vol_ratio = VOL[j] / VOL_MA[j] if has_vol and VOL_MA[j] > 0 else 1.0
+
             # ── B1: EMA金叉 + ADX趋势确认 + 价格在趋势线上 ──────────────────
+            # V4.0: 金叉信号需要量能确认（vol_ratio > 0.8，排除缩量假金叉）
             if (j >= 1 and trending and
                     EF[j] > ES[j] and EF[j-1] <= ES[j-1] and
-                    C[j] > ET[j]):
+                    C[j] > ET[j] and vol_ratio > 0.8):
                 actions[i] = 'BUY'
                 sl = C[j] - sl_dist
                 sig_sl[i]  = sl
@@ -225,12 +243,13 @@ class TrendBullStrategy(BaseStrategy):
                 continue
 
             # ── B3: 突破近期高点 + 动量强劲 ─────────────────────────────────
+            # V4.0: 突破信号需要放量确认（vol_ratio > 1.2）
             if j >= 20:
                 recent_high = np.max(H[j-20:j])
                 if (C[j] > recent_high and
                         C[j] > O[j] and
                         (C[j] - O[j]) > ATR[j] * 0.8 and
-                        C[j] > ET[j]):
+                        C[j] > ET[j] and vol_ratio > 1.2):
                     actions[i] = 'BUY'
                     sl = recent_high - ATR[j] * 0.5
                     sig_sl[i]  = sl
@@ -241,9 +260,11 @@ class TrendBullStrategy(BaseStrategy):
                     continue
 
             # ── S1: 死叉 + 趋势转弱（保护性做空）────────────────────────────
+            # V4.0: 死叉做空需要量能确认（vol_ratio > 0.8）
             if (j >= 1 and
                     EF[j] < ES[j] and EF[j-1] >= ES[j-1] and
-                    C[j] < ET[j] and ADX[j] > self.adx_threshold):
+                    C[j] < ET[j] and ADX[j] > self.adx_threshold
+                    and vol_ratio > 0.8):
                 actions[i] = 'SELL'
                 sl = C[j] + sl_dist
                 sig_sl[i]  = sl
@@ -305,8 +326,16 @@ class TrendBullStrategy(BaseStrategy):
         trending = ADX[j] > self.adx_threshold
         entry    = df['open'].iloc[-1]
 
-        # B1
-        if (j >= 1 and trending and EF[j] > ES[j] and EF[j-1] <= ES[j-1] and C[j] > ET[j]):
+        # V4.0: 成交量比率
+        vol_ratio = 1.0
+        if 'volume' in df.columns and 'vol_ma' in df.columns:
+            vol_ma_val = df['vol_ma'].values[j]
+            if not np.isnan(vol_ma_val) and vol_ma_val > 0:
+                vol_ratio = df['volume'].values[j] / vol_ma_val
+
+        # B1 (V4.0: +量能确认 vol_ratio > 0.8)
+        if (j >= 1 and trending and EF[j] > ES[j] and EF[j-1] <= ES[j-1]
+                and C[j] > ET[j] and vol_ratio > 0.8):
             sl = C[j] - sl_dist
             sig.update({"action": "BUY", "entry": entry, "sl": sl,
                         "tp1": entry + sl_dist * self.rr1,
@@ -323,11 +352,12 @@ class TrendBullStrategy(BaseStrategy):
                         "tp2": entry + risk * self.rr1 * 2,
                         "reason": "🟢 B2: 趋势回踩EMA超卖回升"})
             return sig
-        # B3
+        # B3 (V4.0: +放量确认 vol_ratio > 1.2)
         if j >= 20:
             recent_high = np.max(H[j-20:j])
             if (C[j] > recent_high and C[j] > O[j] and
-                    (C[j] - O[j]) > ATR[j] * 0.8 and C[j] > ET[j]):
+                    (C[j] - O[j]) > ATR[j] * 0.8 and C[j] > ET[j]
+                    and vol_ratio > 1.2):
                 sl = recent_high - ATR[j] * 0.5
                 risk = abs(entry - sl)
                 sig.update({"action": "BUY", "entry": entry, "sl": sl,
@@ -335,9 +365,9 @@ class TrendBullStrategy(BaseStrategy):
                             "tp2": entry + risk * self.rr1 * 2,
                             "reason": "🟢 B3: 动量突破近期高点"})
                 return sig
-        # S1
+        # S1 (V4.0: +量能确认 vol_ratio > 0.8)
         if (j >= 1 and EF[j] < ES[j] and EF[j-1] >= ES[j-1] and
-                C[j] < ET[j] and trending):
+                C[j] < ET[j] and trending and vol_ratio > 0.8):
             sl = C[j] + sl_dist
             sig.update({"action": "SELL", "entry": entry, "sl": sl,
                         "tp1": entry - sl_dist * self.rr1,

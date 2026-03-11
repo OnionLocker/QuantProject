@@ -1,36 +1,34 @@
 """
-strategy/selector.py - 市场状态判断 + 策略自动选择器
+strategy/selector.py - 市场状态判断 + 策略自动选择器 V4.0
+
+V4.0 机构级改进：
+  - 多时间框架确认 (MTF)：4h 高时间框架作为方向过滤器
+  - 成交量 Profile：用 VWAP 偏离度增强 regime 判断
+  - 信号质量评分系统：综合多维度给信号打分 [0,100]
+  - 三源一致性加分：技术+链上+新闻全一致时额外加成
+  - 动态否决权阈值：基于近期费率分布百分位自适应
+  - Regime 切换旧仓管理：切换时输出 close_old_position 指令
 
 综合「技术面」+「新闻面」+「链上数据」得出当前市场所处阶段：
   - bull   (牛市)  → TrendBullStrategy
   - bear   (熊市)  → TrendBearStrategy
   - ranging(震荡)  → RangeOscillatorStrategy
-  - (可在 config.yaml 覆盖各阶段策略)
+  - breakout       → BigCandleStrategy
+  - wait           → 不交易
 
-技术面评分（RegimeDetector）：
-  - ADX > 22 且 EMA 向上排列 → 牛市信号
-  - ADX > 22 且 EMA 向下排列 → 熊市信号
-  - ADX < 18                 → 震荡信号
-  - 布林带宽度收窄             → 震荡信号加分
+技术面评分：
+  - ADX + EMA排列 + 价格位置 + 布林带宽度 + 成交量确认
+  - V4.0: VWAP 偏离度作为第五维度
+  - V4.0: 多时间框架方向过滤
 
-V2.0 资金费率 + OI 信号：
-  - 资金费率极端正 (>0.05%)     → 多头拥挤，偏看跌
-  - 资金费率极端负 (<-0.05%)    → 空头拥挤，偏看涨
-  - OI 大幅上升 + 价格同向      → 趋势确认
-  - OI 大幅下降                → 去杠杆，趋势可能反转
-
-新闻面评分（news_fetcher + AI情绪分析）：
-  - 情绪分 > 阈值              → 看涨倾向
-  - 情绪分 < 阈值              → 看跌倾向
-  - 无新闻数据/超时             → 忽略，纯靠技术面
-  - V2.0: 动态权重（根据数据新鲜度、数量、AI可用性调整）
-
-最终决策：技术面权重 + 新闻面权重 + 链上数据权重（可在 config.yaml 调整）
-切换保护：状态连续 N 根 K 线确认才切换，防抖。
+资金费率 + OI 链上数据：
+  - V4.0: 动态否决权阈值（基于近期费率百分位）
+  - V4.0: OI 连续性分析（持续上升 vs 单期暴增）
 """
 
 import logging
 import time
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -78,7 +76,12 @@ class MarketRegimeSelector:
         self.news_max_age_min = sc.get("news_max_age_min", 120)   # 超过此分钟数视为过期
 
         # 切换保护：连续 N 根K线同一 regime 才正式切换
-        self.confirm_bars     = sc.get("confirm_bars",     3)
+        # V3.0: 动态 confirm_bars（根据置信度自适应）
+        self.confirm_bars          = sc.get("confirm_bars",          3)    # 默认值（兼容旧配置）
+        self.confirm_bars_fast     = sc.get("confirm_bars_fast",     2)    # 高置信度：快速确认
+        self.confirm_bars_slow     = sc.get("confirm_bars_slow",     4)    # 低置信度：慢速确认
+        self.confirm_fast_thresh   = sc.get("confirm_fast_thresh",   0.7)  # 置信度 > 此值用快速
+        self.confirm_slow_thresh   = sc.get("confirm_slow_thresh",   0.4)  # 置信度 < 此值用慢速
 
         # 各 regime 对应的策略名（可在 config.yaml 覆盖）
         self.strategy_map = {
@@ -106,6 +109,11 @@ class MarketRegimeSelector:
         self.oi_spike_pct       = sc.get("oi_spike_pct",       0.10)  # OI 变化幅度阈值
         self.enable_market_extra = sc.get("enable_market_extra", True)  # 是否启用链上数据
 
+        # V3.0: 资金费率否决权（极端费率时强制 WAIT）
+        self.funding_veto_enable = sc.get("funding_veto_enable", True)   # 是否启用否决权
+        self.funding_veto_mult   = sc.get("funding_veto_mult",   2.0)    # 费率 > extreme × 此倍数时触发
+        self.funding_veto_contra = sc.get("funding_veto_contra", True)   # 是否只在与技术面方向冲突时否决
+
         # V2.0: 动态新闻权重
         self.dynamic_news_weight = sc.get("dynamic_news_weight", True)  # 是否启用动态权重
 
@@ -128,6 +136,38 @@ class MarketRegimeSelector:
         self._last_tech_conf:        float = 0.0
         self._last_tech_calc_time:   float = 0.0
         self._tech_cache_seconds:    int   = 60   # 最多60秒重算一次
+
+        # ── V4.0: 信号质量评分系统 ──────────────────────────────────────────
+        self._signal_quality_score: float = 0.0   # 最新信号质量分 [0, 100]
+
+        # V4.0: VWAP 偏离度参数
+        self._vwap_period         = sc.get("vwap_period",         20)
+        self._vwap_deviation_pct  = sc.get("vwap_deviation_pct",  0.02)   # 2% 偏离视为极端
+
+        # V4.0: 多时间框架确认（高时间框架方向过滤）
+        self._mtf_enable       = sc.get("mtf_enable",       True)
+        self._mtf_ema_period   = sc.get("mtf_ema_period",   50)    # 4h 级别的 EMA
+        self._mtf_weight       = sc.get("mtf_weight",       0.15)  # MTF 在总权重中的占比
+        self._mtf_regime:      str   = REGIME_UNKNOWN
+        self._mtf_conf:        float = 0.0
+        self._mtf_calc_time:   float = 0.0
+        self._mtf_cache_seconds: int = 300  # 5 分钟重算一次 MTF
+
+        # V4.0: 动态否决权阈值（基于近期费率分布百分位）
+        self._funding_rate_history: deque = deque(maxlen=48)  # 最近48期费率
+        self._dynamic_veto_enable  = sc.get("dynamic_veto_enable",  True)
+        self._dynamic_veto_pctile  = sc.get("dynamic_veto_pctile",  90)  # 90th百分位
+
+        # V4.0: OI 连续性分析
+        self._oi_history: deque = deque(maxlen=12)  # 最近12次OI变化
+
+        # V4.0: Regime 切换旧仓管理
+        self._prev_confirmed_regime: str = REGIME_UNKNOWN
+        self.regime_transition_action: Optional[str] = None  # "close_long" | "close_short" | None
+        self.regime_transition_urgency: float = 0.0          # 0~1, 1=立即平仓
+
+        # V4.0: 信号质量评分明细
+        self.last_signal_quality: dict = {}
 
     # ── 技术面：ADX + EMA 排列 + 布林带宽度 ────────────────────────────────────
 
@@ -219,6 +259,39 @@ class MarketRegimeSelector:
         elif close_j < el_val * 0.98:
             score -= 0.5
 
+        # V4.0: 成交量确认维度 ──────────────────────────────────────────
+        # 趋势若有成交量支撑，信号更可靠
+        if 'volume' in df.columns and len(df) > 20:
+            vol = df['volume']
+            vol_ma = vol.rolling(20).mean()
+            vol_ratio = vol.iloc[j] / vol_ma.iloc[j] if vol_ma.iloc[j] > 0 else 1.0
+            if not pd.isna(vol_ratio):
+                if vol_ratio > 1.5 and abs(score) > 1.0:
+                    # 量价配合：趋势有量支撑，加分
+                    score *= 1.15
+                elif vol_ratio < 0.5 and abs(score) > 1.0:
+                    # 缩量趋势：可能是假趋势，减分
+                    score *= 0.85
+
+        # V4.0: VWAP 偏离度维度 ──────────────────────────────────────────
+        # 价格偏离 VWAP 过远 = 均值回归压力
+        if 'volume' in df.columns and len(df) > self._vwap_period:
+            try:
+                typical_price = (df['high'] + df['low'] + df['close']) / 3
+                vol = df['volume']
+                vwap = (typical_price * vol).rolling(self._vwap_period).sum() / \
+                       vol.rolling(self._vwap_period).sum().replace(0, np.nan)
+                vwap_val = vwap.iloc[j]
+                if not pd.isna(vwap_val) and vwap_val > 0:
+                    vwap_dev = (close_j - vwap_val) / vwap_val
+                    # 价格远在 VWAP 上方时，做多信号打折（均值回归压力）
+                    if vwap_dev > self._vwap_deviation_pct and score > 1.0:
+                        score *= 0.9
+                    elif vwap_dev < -self._vwap_deviation_pct and score < -1.0:
+                        score *= 0.9
+            except Exception:
+                pass
+
         # 布林带挤压 → 震荡信号
         if bw_val < self.bb_squeeze_pct:
             score *= 0.3   # 挤压期信号衰减
@@ -257,6 +330,222 @@ class MarketRegimeSelector:
             return REGIME_BEAR, confidence
         else:
             return REGIME_RANGING, confidence
+
+    # ── V4.0: 多时间框架确认 ────────────────────────────────────────────────
+    def _calc_mtf_regime(self, df: pd.DataFrame) -> tuple[str, float]:
+        """
+        用 4h 等效数据（聚合 1h K 线）做高时间框架方向确认。
+        原理：机构级策略通常要求高时间框架方向一致才入场（top-down analysis）。
+        """
+        if not self._mtf_enable or df is None or len(df) < self._mtf_ema_period * 4 + 10:
+            return REGIME_UNKNOWN, 0.0
+
+        now = time.time()
+        if now - self._mtf_calc_time < self._mtf_cache_seconds:
+            return self._mtf_regime, self._mtf_conf
+
+        try:
+            # 从 1h K 线聚合出 4h K 线
+            df_4h = df.resample('4h').agg({
+                'open': 'first', 'high': 'max', 'low': 'min',
+                'close': 'last', 'volume': 'sum'
+            }).dropna()
+
+            if len(df_4h) < self._mtf_ema_period + 5:
+                return REGIME_UNKNOWN, 0.0
+
+            c4 = df_4h['close']
+            ema_mtf = c4.ewm(span=self._mtf_ema_period, adjust=False).mean()
+
+            j = -2
+            close_4h = c4.iloc[j]
+            ema_4h = ema_mtf.iloc[j]
+
+            if pd.isna(close_4h) or pd.isna(ema_4h):
+                return REGIME_UNKNOWN, 0.0
+
+            # EMA 斜率（5 根 4h = 20h 方向）
+            if len(ema_mtf) > 5:
+                slope = ema_mtf.iloc[j] - ema_mtf.iloc[j - 5]
+            else:
+                slope = 0.0
+
+            if close_4h > ema_4h and slope > 0:
+                regime = REGIME_BULL
+                conf = min(abs(close_4h - ema_4h) / ema_4h / 0.02, 1.0)
+            elif close_4h < ema_4h and slope < 0:
+                regime = REGIME_BEAR
+                conf = min(abs(close_4h - ema_4h) / ema_4h / 0.02, 1.0)
+            else:
+                regime = REGIME_RANGING
+                conf = 0.3
+
+            self._mtf_regime = regime
+            self._mtf_conf = conf
+            self._mtf_calc_time = now
+            return regime, conf
+
+        except Exception as e:
+            logger.debug(f"MTF 计算失败: {e}")
+            return REGIME_UNKNOWN, 0.0
+
+    # ── V4.0: 信号质量评分系统 ────────────────────────────────────────────────
+    def _calc_signal_quality(self, tech_regime: str, tech_conf: float,
+                              extra_regime: str, extra_conf: float,
+                              news_regime: str, news_conf: float,
+                              mtf_regime: str, mtf_conf: float,
+                              final_regime: str) -> float:
+        """
+        综合评分系统 [0, 100]，衡量信号的可靠程度。
+        机构级策略通常只在 quality >= 60 时满仓，40~60 半仓，<40 观望。
+
+        评分维度：
+          1. 技术面置信度 (30分)
+          2. 多源一致性  (25分) ← 技术/链上/新闻/MTF 方向一致
+          3. 链上数据质量 (20分)
+          4. MTF方向确认  (15分)
+          5. 波动率环境   (10分)
+        """
+        q = {}
+        total = 0.0
+
+        # 1. 技术面置信度 (0-30分)
+        tech_score = tech_conf * 30
+        q["tech"] = round(tech_score, 1)
+        total += tech_score
+
+        # 2. 多源一致性 (0-25分)
+        sources = [tech_regime, extra_regime, news_regime, mtf_regime]
+        valid_sources = [s for s in sources if s != REGIME_UNKNOWN]
+        if valid_sources:
+            agree_count = sum(1 for s in valid_sources if s == final_regime)
+            agreement_ratio = agree_count / len(valid_sources)
+            consistency_score = agreement_ratio * 25
+            # 三源以上全一致额外加成
+            if agree_count >= 3:
+                consistency_score = min(25, consistency_score * 1.2)
+        else:
+            consistency_score = 5.0  # 只有技术面，给基础分
+
+        q["consistency"] = round(consistency_score, 1)
+        total += consistency_score
+
+        # 3. 链上数据质量 (0-20分)
+        if extra_regime != REGIME_UNKNOWN:
+            extra_score = extra_conf * 20
+            # 链上方向与最终一致时加分
+            if extra_regime == final_regime:
+                extra_score = min(20, extra_score * 1.1)
+        else:
+            extra_score = 0.0
+        q["extra"] = round(extra_score, 1)
+        total += extra_score
+
+        # 4. MTF方向确认 (0-15分)
+        if mtf_regime != REGIME_UNKNOWN:
+            if mtf_regime == final_regime:
+                mtf_score = mtf_conf * 15
+            else:
+                # MTF 方向冲突，反而扣分
+                mtf_score = -5.0
+        else:
+            mtf_score = 0.0
+        q["mtf"] = round(mtf_score, 1)
+        total += mtf_score
+
+        # 5. 波动率环境 (0-10分)
+        # 已在 tech_conf 中隐含（BB 挤压时 conf 低），这里给基础分
+        vol_score = 5.0 + (tech_conf * 5.0)
+        q["volatility"] = round(vol_score, 1)
+        total += vol_score
+
+        total = max(0, min(100, total))
+        q["total"] = round(total, 1)
+        self.last_signal_quality = q
+        self._signal_quality_score = total
+        return total
+
+    # ── V4.0: 动态否决权阈值 ─────────────────────────────────────────────────
+    def _get_dynamic_veto_threshold(self) -> float:
+        """
+        基于近期费率分布的百分位计算动态否决阈值。
+        原理：固定 0.1% 阈值在牛市/熊市表现不同，动态百分位更适应。
+        """
+        if not self._dynamic_veto_enable or len(self._funding_rate_history) < 8:
+            # 数据不足，使用固定阈值
+            return self.funding_extreme * self.funding_veto_mult
+
+        rates = [abs(r) for r in self._funding_rate_history]
+        dynamic_thresh = float(np.percentile(rates, self._dynamic_veto_pctile))
+        # 保底：不低于固定阈值的 50%，也不高于 3x
+        fixed_thresh = self.funding_extreme * self.funding_veto_mult
+        return max(fixed_thresh * 0.5, min(dynamic_thresh, fixed_thresh * 3.0))
+
+    # ── V4.0: OI 连续性分析 ──────────────────────────────────────────────────
+    def _analyze_oi_continuity(self) -> tuple[str, float]:
+        """
+        分析 OI 的连续变化方向。
+        连续 3 期以上同方向变化 = 强信号（机构资金持续流入/流出）
+        单期暴增 = 可能是短期投机，信号衰减。
+        """
+        if len(self._oi_history) < 3:
+            return "neutral", 0.0
+
+        recent = list(self._oi_history)[-6:]  # 最近 6 期
+        rising_count = sum(1 for x in recent if x > 0.02)
+        falling_count = sum(1 for x in recent if x < -0.02)
+
+        if rising_count >= 3:
+            strength = min(1.0, rising_count / 5.0)
+            return "sustained_rise", strength
+        elif falling_count >= 3:
+            strength = min(1.0, falling_count / 5.0)
+            return "sustained_fall", strength
+        elif len(recent) > 0 and abs(recent[-1]) > 0.1:
+            # 单期暴增/暴跌
+            return "spike", 0.3
+        return "neutral", 0.0
+
+    # ── V4.0: Regime 切换旧仓管理 ─────────────────────────────────────────────
+    def _check_regime_transition(self, old_regime: str, new_regime: str,
+                                   confidence: float) -> None:
+        """
+        当 regime 发生切换时，评估是否需要平掉旧 regime 方向的仓位。
+
+        规则（参考机构做法）：
+          - BULL→BEAR: 紧急平多，urgency=1.0
+          - BULL→RANGING: 建议平多但不紧急，urgency=0.5
+          - BULL→WAIT: 保持但收紧止损，urgency=0.3
+          - BEAR→BULL: 紧急平空，urgency=1.0
+          - BEAR→RANGING: 建议平空但不紧急，urgency=0.5
+          - 其他切换: urgency=0.0 (不干预)
+        """
+        self.regime_transition_action = None
+        self.regime_transition_urgency = 0.0
+
+        if old_regime == new_regime or old_regime == REGIME_UNKNOWN:
+            return
+
+        transitions = {
+            (REGIME_BULL, REGIME_BEAR):    ("close_long",  1.0),
+            (REGIME_BULL, REGIME_RANGING): ("close_long",  0.5),
+            (REGIME_BULL, REGIME_WAIT):    ("tighten_sl",  0.3),
+            (REGIME_BEAR, REGIME_BULL):    ("close_short", 1.0),
+            (REGIME_BEAR, REGIME_RANGING): ("close_short", 0.5),
+            (REGIME_BEAR, REGIME_WAIT):    ("tighten_sl",  0.3),
+        }
+
+        action_info = transitions.get((old_regime, new_regime))
+        if action_info:
+            action, base_urgency = action_info
+            # 高置信度切换 = 更紧急
+            urgency = min(1.0, base_urgency * (0.5 + confidence * 0.5))
+            self.regime_transition_action = action
+            self.regime_transition_urgency = urgency
+            logger.warning(
+                f"⚡ Regime 切换处理: {old_regime}→{new_regime}, "
+                f"操作={action}, 紧急度={urgency:.2f}"
+            )
 
     # ── 新闻面情绪 ────────────────────────────────────────────────────────────
 
@@ -352,17 +641,13 @@ class MarketRegimeSelector:
 
     def evaluate(self, df: pd.DataFrame, symbol: str = "BTC/USDT:USDT") -> dict:
         """
-        综合技术面 + 新闻面 + 链上数据，输出当前市场状态判断。
+        综合技术面 + 新闻面 + 链上数据 + MTF + 信号质量评分，输出当前市场状态判断。
 
-        返回：{
-            "regime":      str,   # bull/bear/ranging/unknown
-            "confidence":  float, # [0,1]
-            "tech_regime": str,
-            "news_regime": str,
-            "extra_regime": str,  # V2.0: 资金费率/OI 信号
-            "reason":      str,   # 可读说明
-            "strategy_name": str, # 推荐策略名
-        }
+        V4.0 新增返回字段：
+            "signal_quality":       float,  # [0,100] 信号质量评分
+            "mtf_regime":           str,    # 多时间框架方向
+            "transition_action":    str,    # 旧仓管理指令
+            "transition_urgency":   float,  # 旧仓管理紧急度
         """
         # 清理上次 detail
         self.last_regime_detail = {}
@@ -375,6 +660,9 @@ class MarketRegimeSelector:
         tech_regime = self._last_tech_regime
         tech_conf   = self._last_tech_conf
 
+        # V4.0: 多时间框架确认
+        mtf_regime, mtf_conf = self._calc_mtf_regime(df)
+
         # 新闻面（news_weight=0 时直接跳过，避免无意义的 import 和 DB 查询）
         if self.news_weight > 0:
             news_regime, news_conf = self._get_news_regime()
@@ -384,23 +672,38 @@ class MarketRegimeSelector:
         # V2.0: 资金费率 + OI 链上数据
         extra_regime, extra_conf = self._get_market_extra(symbol)
 
+        # V4.0: 更新费率和OI历史（用于动态否决权和OI连续性分析）
+        if self._last_extra_data:
+            funding_data = self._last_extra_data.get("funding")
+            if funding_data:
+                fr = funding_data.get("funding_rate", 0)
+                self._funding_rate_history.append(fr)
+            oi_data = self._last_extra_data.get("oi")
+            if oi_data:
+                self._oi_history.append(oi_data.get("change_pct", 0))
+
+        # V4.0: OI 连续性分析增强
+        oi_continuity_signal, oi_continuity_strength = self._analyze_oi_continuity()
+
         # ── 加权投票 ─────────────────────────────────────────────────────────
         votes = {REGIME_BULL: 0.0, REGIME_BEAR: 0.0, REGIME_RANGING: 0.0,
                  REGIME_BREAKOUT: 0.0, REGIME_WAIT: 0.0}
 
-        # 计算实际权重（V2.0: 链上数据分走部分权重）
+        # 计算实际权重（V4.0: MTF 分走部分权重）
         total_extra_weight = self.funding_weight + self.oi_weight
         effective_tech_weight = self.tech_weight
         effective_news_weight = self.news_weight
+        effective_mtf_weight = self._mtf_weight if self._mtf_enable else 0.0
 
-        # 如果启用了链上数据，从技术面权重中分配
+        # 确保权重总和 ≤ 1.0
         if self.enable_market_extra and total_extra_weight > 0:
-            # 确保权重总和 ≤ 1.0
-            weight_sum = effective_tech_weight + effective_news_weight + total_extra_weight
+            weight_sum = (effective_tech_weight + effective_news_weight +
+                         total_extra_weight + effective_mtf_weight)
             if weight_sum > 1.0:
                 scale = 1.0 / weight_sum
                 effective_tech_weight *= scale
                 effective_news_weight *= scale
+                effective_mtf_weight *= scale
 
         # 技术面投票
         if tech_regime != REGIME_UNKNOWN:
@@ -421,6 +724,16 @@ class MarketRegimeSelector:
             if funding_data and abs(funding_data.get("funding_rate", 0)) > self.funding_extreme * 2:
                 votes[REGIME_WAIT] += 0.1  # 轻微的观望偏向
 
+        # V4.0: 多时间框架投票
+        if mtf_regime != REGIME_UNKNOWN:
+            votes[mtf_regime] += effective_mtf_weight * (0.5 + mtf_conf * 0.5)
+
+        # V4.0: OI 连续性加成投票
+        if oi_continuity_signal == "sustained_rise" and tech_regime in (REGIME_BULL, REGIME_BREAKOUT):
+            votes[tech_regime] += 0.05 * oi_continuity_strength
+        elif oi_continuity_signal == "sustained_fall" and tech_regime in (REGIME_BEAR, REGIME_WAIT):
+            votes[tech_regime] += 0.05 * oi_continuity_strength
+
         # 无投票时返回 unknown
         total_votes = sum(votes.values())
         if total_votes == 0:
@@ -430,29 +743,82 @@ class MarketRegimeSelector:
             regime    = max(votes, key=votes.get)
             confidence = votes[regime] / total_votes
 
-        # ── 防抖保护：连续 confirm_bars 根K线确认才正式切换 ─────────────────
+        # ── V4.0: 动态否决权阈值 ─────────────────────────────────────────
+        funding_vetoed = False
+        if self.funding_veto_enable and self._last_extra_data:
+            funding_data = self._last_extra_data.get("funding")
+            if funding_data:
+                fr = funding_data.get("funding_rate", 0)
+                veto_threshold = self._get_dynamic_veto_threshold()
+                if abs(fr) > veto_threshold:
+                    if self.funding_veto_contra:
+                        contra = ((fr > 0 and regime == REGIME_BULL) or
+                                  (fr < 0 and regime == REGIME_BEAR))
+                        if contra:
+                            funding_vetoed = True
+                            logger.warning(
+                                f"⛔ 动态否决: fr={fr:.6f} 与 regime={regime} 冲突，"
+                                f"强制 WAIT（动态阈值={veto_threshold:.6f}）"
+                            )
+                    else:
+                        funding_vetoed = True
+                        logger.warning(
+                            f"⛔ 动态否决: fr={fr:.6f} 极端，"
+                            f"强制 WAIT（动态阈值={veto_threshold:.6f}）"
+                        )
+                    if funding_vetoed:
+                        regime = REGIME_WAIT
+                        confidence = 0.3
+
+        # ── 防抖保护：动态 confirm_bars（V3.0 置信度加权）─────────────────
+        if confidence >= self.confirm_fast_thresh:
+            dynamic_confirm = self.confirm_bars_fast
+        elif confidence <= self.confirm_slow_thresh:
+            dynamic_confirm = self.confirm_bars_slow
+        else:
+            ratio = ((confidence - self.confirm_slow_thresh)
+                     / max(self.confirm_fast_thresh - self.confirm_slow_thresh, 0.01))
+            dynamic_confirm = round(
+                self.confirm_bars_slow - ratio * (self.confirm_bars_slow - self.confirm_bars_fast)
+            )
+            dynamic_confirm = max(self.confirm_bars_fast, min(self.confirm_bars_slow, dynamic_confirm))
+
         if regime == self._pending_regime:
             self._pending_count += 1
         else:
             self._pending_regime = regime
             self._pending_count  = 1
 
-        if self._pending_count >= self.confirm_bars:
+        if self._pending_count >= dynamic_confirm:
             if regime != self._confirmed_regime:
+                # V4.0: Regime 切换旧仓管理
+                self._prev_confirmed_regime = self._confirmed_regime
+                self._check_regime_transition(
+                    self._prev_confirmed_regime, regime, confidence
+                )
                 logger.info(
                     f"🔄 市场状态切换: {self._confirmed_regime} → {regime} "
-                    f"(置信度={confidence:.2f}, 技术={tech_regime}, "
-                    f"新闻={news_regime}, 链上={extra_regime})"
+                    f"(置信度={confidence:.2f}, 确认根数={dynamic_confirm}, "
+                    f"技术={tech_regime}, 新闻={news_regime}, "
+                    f"链上={extra_regime}, MTF={mtf_regime})"
                 )
             self._confirmed_regime = regime
 
         final_regime = self._confirmed_regime
         strategy_name = self.strategy_map.get(final_regime, "")
 
+        # V4.0: 信号质量评分
+        signal_quality = self._calc_signal_quality(
+            tech_regime, tech_conf, extra_regime, extra_conf,
+            news_regime, news_conf, mtf_regime, mtf_conf, final_regime
+        )
+
         reason = (
             f"技术面={tech_regime}(conf={tech_conf:.2f}) "
             f"新闻面={news_regime}(conf={news_conf:.2f}) "
             f"链上={extra_regime}(conf={extra_conf:.2f}) "
+            f"MTF={mtf_regime}(conf={mtf_conf:.2f}) "
+            f"质量={signal_quality:.0f} "
             f"→ 确认={final_regime} 策略={strategy_name or '未配置'}"
         )
 
@@ -466,19 +832,32 @@ class MarketRegimeSelector:
             "news_conf": round(news_conf, 3),
             "extra_regime": extra_regime,
             "extra_conf": round(extra_conf, 3),
+            "mtf_regime": mtf_regime,
+            "mtf_conf": round(mtf_conf, 3),
             "votes": {k: round(v, 3) for k, v in votes.items()},
             "strategy_name": strategy_name,
             "in_transition": self.in_transition,
+            "dynamic_confirm_bars": dynamic_confirm,
+            "funding_vetoed": funding_vetoed,
+            "signal_quality": round(signal_quality, 1),
+            "signal_quality_detail": self.last_signal_quality,
+            "oi_continuity": oi_continuity_signal,
+            "transition_action": self.regime_transition_action,
+            "transition_urgency": round(self.regime_transition_urgency, 2),
         })
 
         return {
-            "regime":        final_regime,
-            "confidence":    round(confidence, 3),
-            "tech_regime":   tech_regime,
-            "news_regime":   news_regime,
-            "extra_regime":  extra_regime,
-            "reason":        reason,
-            "strategy_name": strategy_name,
+            "regime":              final_regime,
+            "confidence":          round(confidence, 3),
+            "tech_regime":         tech_regime,
+            "news_regime":         news_regime,
+            "extra_regime":        extra_regime,
+            "mtf_regime":          mtf_regime,
+            "reason":              reason,
+            "strategy_name":       strategy_name,
+            "signal_quality":      round(signal_quality, 1),
+            "transition_action":   self.regime_transition_action,
+            "transition_urgency":  round(self.regime_transition_urgency, 2),
         }
 
     def get_strategy(self, df: pd.DataFrame, symbol: str = "BTC/USDT:USDT"):

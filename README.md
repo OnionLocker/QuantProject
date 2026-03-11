@@ -8,6 +8,7 @@
 
 | 版本 | 内容 |
 |------|------|
+| **V4.0** | 🏛️ 机构级升级：多时间框架确认(MTF)、信号质量评分系统[0-100]、VWAP偏离度过滤、动态否决权阈值、OI连续性分析、成交量确认过滤器、Regime切换旧仓管理、三级回撤保护、Equity Curve Trading、动态风险预算(简化Kelly)、每日交易次数限制、RANGE止损优化 |
 | **V3.5** | 回测引擎大升级：AUTO 模式回测、追踪止损、时间止损、动态仓位、策略切换明细、per-strategy 统计；前端回测页高级功能面板 |
 | **V3.0** | 前端可视化 + 市场数据 API：Dashboard 市场情绪面板、5 个 `/api/market/*` 端点、WebSocket 推送 regime 详情 |
 | **V2.5** | 高级风控：Trailing Stop、时间止损、动态仓位、策略绩效追踪表、DB migration v3 |
@@ -62,6 +63,7 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │             Bot Runner (core/user_bot/runner.py)                  │
 │  主循环：拉K线 → 策略信号 → 风控检查 → 下单 → 监控持仓 → 通知  │
+│  V4.0：Regime切换旧仓管理 + 信号质量仓位缩放 + 动态风险比例     │
 │  V2.5：Trailing Stop + 时间止损 + 动态仓位 + 策略绩效追踪       │
 │  网络分级：rate_limit / maintenance / auth_error / network       │
 │  持仓状态：bot_state 表 (JSON)                                   │
@@ -73,11 +75,11 @@
     ▼          ▼              ▼                    ▼
 ┌────────┐ ┌──────────┐ ┌──────────────────┐ ┌──────────────────┐
 │ OKX    │ │ Strategy │ │ Risk Manager     │ │ Market Data      │
-│ (ccxt) │ │ Layer    │ │ (risk/           │ │ (V2.0)           │
+│ (ccxt) │ │ Layer    │ │ V4.0 (risk/      │ │ (V2.0)           │
 │        │ │ 6 策略   │ │  risk_manager.py)│ │ 资金费率 + OI    │
-│ 实/模  │ │ + AUTO   │ │ 连亏熔断         │ │ (market_extra.py)│
-│ 盘切换 │ │ 选择器   │ │ 日亏熔断         │ │ AI 情绪分析      │
-│        │ │          │ │ 仓位计算         │ │ (ai_client.py)   │
+│ 实/模  │ │ + AUTO   │ │ 连亏/日亏熔断    │ │ (market_extra.py)│
+│ 盘切换 │ │ V4.0选择 │ │ 回撤保护3级      │ │ AI 情绪(可选)    │
+│        │ │ 器(MTF)  │ │ Equity Curve     │ │ (ai_client.py)   │
 └────────┘ └──────────┘ └──────────────────┘ └──────────────────┘
 ```
 
@@ -142,24 +144,25 @@ QuantProject/
 │   ├── okx_client.py           # OKX ccxt 封装（网络重试 + 指数退避）
 │   └── user_bot/
 │       ├── manager.py          # 多用户 Bot 注册表 + Watchdog 守护 + selector 注册
-│       └── runner.py           # 每用户 Bot 主循环（核心交易逻辑 + V2.5 高级风控）
+│       └── runner.py           # 每用户 Bot 主循环（核心交易逻辑 + V4.0 机构级风控）
 │
 ├── strategy/
 │   ├── base.py                 # 策略基类 BaseStrategy
 │   ├── registry.py             # 策略注册表 _REGISTRY（热插拔）
-│   ├── selector.py             # 🔄 市场状态判断 + 策略自动选择器 (AUTO)
+│   ├── selector.py             # 🔄 V4.0 市场状态判断 + 策略自动选择器 (AUTO)
+│   │                           #   MTF + 信号质量评分 + VWAP + 动态否决权
 │   ├── regime_detector.py      # 市场 regime 检测辅助
 │   ├── pa_setups.py            # PA_5S：Price Action 五种形态
 │   ├── adaptive.py             # ADAPTIVE：自适应混合
-│   ├── trend_bull.py           # BULL：EMA 趋势跟踪（多头）
-│   ├── trend_bear.py           # BEAR：EMA 趋势跟踪（空头）
-│   ├── range_oscillator.py     # RANGE：布林带 + RSI 震荡
+│   ├── trend_bull.py           # BULL：EMA 趋势跟踪（多头）+ V4.0 成交量过滤
+│   ├── trend_bear.py           # BEAR：EMA 趋势跟踪（空头）+ V4.0 成交量过滤
+│   ├── range_oscillator.py     # RANGE：布林带收缩突破 + V4.0 止损优化
 │   ├── big_candle.py           # BIG_CANDLE：大阳/大阴线突破
-│   ├── price_action.py         # 早期 PA 策略（保留兼容）
-│   └── STRATEGY_GUIDE.md       # 📖 策略开发规范（AI 必读）
+│   └── STRATEGY_GUIDE.md       # 📖 策略开发规范 + V4.0 机构级功能文档（AI 必读）
 │
 ├── risk/
-│   └── risk_manager.py         # 连亏熔断 + 日亏熔断 + Fixed Fractional Sizing
+│   └── risk_manager.py         # 🔄 V4.0 机构级风控：回撤保护 + Equity Curve +
+│                               #   动态 Kelly + Regime 感知 + 日内限额
 │
 ├── backtest/
 │   └── engine.py               # 回测引擎 V3.5（AUTO 模式 / Trailing Stop / 时间止损 / 动态仓位）
@@ -440,6 +443,8 @@ QuantProject/
 
 当 `config.yaml` 中 `strategy.name` 设为 `"AUTO"` 或用户在 Web 设置中选择 AUTO 时启用。
 
+> 🔑 **AUTO 模式无需外部 AI 服务**。核心决策完全基于数学计算（技术指标 + OKX 公开 API 链上数据），无需 VPS 以外的资源。AI 情绪分析为可选增强（当前默认关闭 `news_weight: 0.0`）。
+
 选择器流程（`strategy/selector.py::MarketRegimeSelector`）：
 
 1. **技术面分析**（权重 `selector.tech_weight`，默认 1.0）：
@@ -447,20 +452,31 @@ QuantProject/
    - EMA 14/40/120 排列方向
    - 布林带宽度（squeeze_pct < 3% 认为挤压）
    - ATR 突变检测（波动率快速通道）
+   - 🆕 V4.0: 成交量确认（量价配合加分/缩量趋势减分）
+   - 🆕 V4.0: VWAP 偏离度（偏离 >2% 趋势信号打折，防追单）
 2. **资金费率 + OI 信号**（V2.0，权重 `funding_weight=0.15` + `oi_weight=0.10`）：
    - OKX 公开 API 实时获取，内存缓存 + SQLite 持久化
    - 资金费率：正费率高 → 多头拥挤 → bearish，负费率高 → 空头拥挤 → bullish
-   - OI 变化：上升 = 新资金入场，下降 = 去杠杆
-3. **新闻 + AI 情绪分析**（权重 `selector.news_weight`，默认 0.0）：
+   - 🆕 V4.0: OI 连续性分析（≥3 期同向 = 强信号，单期暴增 = 衰减至 0.3 权重）
+   - 🆕 V4.0: 动态否决权阈值（基于近期费率 90th 百分位自适应，替代固定 0.1%）
+3. **多时间框架确认 MTF**（🆕 V4.0，权重 `mtf_weight=0.15`）：
+   - 将 1h K 线聚合为 4h K 线，计算 4h EMA(50) 方向
+   - 4h 方向与 1h 一致 → 高置信度加成
+   - 4h 方向与 1h 冲突 → 信号质量扣分
+4. **新闻 + AI 情绪分析**（权重 `selector.news_weight`，默认 **0.0 = 关闭**）：
    - 多源新闻抓取 + 关键词/AI 情绪评分
-   - 支持 OpenAI / DeepSeek 等兼容接口
+   - 支持 OpenAI / DeepSeek 等兼容接口（可选，不影响核心功能）
    - 动态权重：根据新闻新鲜度、数量、AI 可用性自动调整
-4. **WAIT 观望状态**（V1.5）：
+5. **信号质量评分**（🆕 V4.0，[0-100] 分）：
+   - 5 维评分：技术面(30) + 多源一致性(25) + 链上(20) + MTF(15) + 波动率(10)
+   - ≥60 满仓 / 40~60 缩仓 / <40 不开仓
+6. **WAIT 观望状态**（V1.5）：
    - ADX 模糊区间 + ATR 突变无方向 → 不交易
    - 策略切换过渡期前 3 根 K 线半仓试探
-5. **加权投票** → 判定 regime：`bull` / `bear` / `ranging` / `breakout` / `wait`
-6. **防抖保护**：连续 `confirm_bars`（默认 3）根 K 线确认才正式切换策略
-7. **策略映射**：根据 `selector.strategy_bull/bear/ranging/breakout` 映射到具体策略
+7. **加权投票** → 判定 regime：`bull` / `bear` / `ranging` / `breakout` / `wait`
+8. **防抖保护**：动态 confirm_bars（置信度 >0.7 仅需 2 根，<0.4 需 4 根）
+9. **策略映射**：根据 `selector.strategy_bull/bear/ranging/breakout` 映射到具体策略
+10. 🆕 **Regime 切换旧仓管理**：BULL→BEAR 立即平多，切 WAIT 收紧止损 50%
 
 ### 6.3 添加新策略
 
@@ -478,7 +494,7 @@ QuantProject/
 
 ## 7. 风控引擎
 
-### 7.1 风控规则
+### 7.1 基础风控规则
 
 | 规则 | 配置项 | 默认值 | 触发行为 |
 |------|--------|--------|----------|
@@ -496,7 +512,73 @@ QuantProject/
 | **动态仓位 (Dynamic Position)** | `risk_v25.dynamic_position_enable` | regime 置信度 < 0.7 时按比例缩减仓位；策略近期胜率 < 35% 降权 60% |
 | **策略绩效追踪** | DB: `strategy_performance` | 每笔交易记录对应策略的 PnL，用于动态仓位决策 |
 
-### 7.3 风控生命周期
+### 7.3 V4.0 机构级风控
+
+#### 7.3.1 三级回撤保护 (Drawdown Protection)
+
+| 级别 | 回撤 | 仓位缩放 | 动作 |
+|------|------|----------|------|
+| 正常 | < 3% | 100% | 正常交易 |
+| 警告 | 3~5% | 75% | 日志告警 |
+| 减仓 | 5~8% | 50% | 自动降仓 |
+| 熔断 | ≥ 8% | 0% | 停止交易（需手动恢复） |
+
+回撤基准 = 历史最高余额（`_peak_balance`），Bot 启动和每日开始时更新。
+
+#### 7.3.2 Equity Curve Trading
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `equity_curve_enable` | `true` | 是否启用 |
+| `equity_ema_period` | 10 | 资金曲线 EMA 周期（最近 10 笔交易） |
+| `equity_below_ema_scale` | 0.6 | 低于 EMA 时仓位缩放至 60% |
+
+**原理**：当账户余额跌破最近 10 笔交易的 EMA 时，说明策略处于不利期，自动降仓保护本金。余额回到 EMA 上方后恢复正常。
+
+#### 7.3.3 动态风险预算 (Dynamic Risk Budget)
+
+基于简化 Kelly Criterion + 连亏惩罚：
+
+```
+risk_mult = max(0.5, min(1.5, win_rate × 2.0))   # 简化Kelly
+loss_penalty = max(0.4, 1.0 - consecutive_losses × 0.15)  # 连亏罚分
+effective_risk = base_risk × kelly × drawdown_scale × equity_scale × regime_scale
+```
+
+各因子说明：
+- `drawdown_scale`：回撤等级缩放 [0, 1]
+- `equity_scale`：Equity Curve 缩放 [0.6, 1.0]
+- `regime_scale`：Regime 风险乘数 [0, 1]（WAIT=0, 低置信度=0.6, 正常=1.0）
+
+#### 7.3.4 Regime 感知仓位调节
+
+| 场景 | 风险乘数 | 说明 |
+|------|----------|------|
+| 正常 regime + 高置信度 | 1.0 | 满仓 |
+| regime 置信度 < 0.7 | 0.8 | 轻微降权 |
+| regime 置信度 < 0.4 | 0.6 | 显著降权 |
+| 刚发生方向切换 | 0.5 | 切换期风险最高 |
+| WAIT 观望 | 0.0 | 不开仓 |
+
+#### 7.3.5 每日交易次数限制
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `max_daily_trades` | 8 | 每日最多开仓 8 次 |
+
+防止策略在震荡市过度交易（高频亏损）。跨日自动重置，熔断恢复不重置当日计数。
+
+#### 7.3.6 信号质量仓位缩放
+
+| 质量分 | 仓位 | 说明 |
+|--------|------|------|
+| ≥ 60 | 100% | 满仓开仓 |
+| 40~60 | `quality/100` | 按比例缩仓 |
+| < 40 | 0% | 不开仓 |
+
+信号质量分由 selector 的 5 维评分系统计算 [0, 100]。
+
+### 7.4 风控生命周期
 
 ```
 Bot 启动 → _restore_risk_state()（从 risk_state 表恢复）
@@ -549,6 +631,19 @@ selector:                       # AUTO 模式选择器参数
   enable_market_extra: true     # 🆕 V2.0: 是否启用资金费率/OI 数据增强
   funding_weight: 0.15          # 🆕 V2.0: 资金费率权重
   oi_weight: 0.10               # 🆕 V2.0: OI 权重
+  # V4.0: 多时间框架确认 (MTF)
+  mtf_enable: true              # 是否启用 4h 级别方向过滤
+  mtf_ema_period: 50            # 4h 级别 EMA 周期
+  mtf_weight: 0.15              # MTF 在加权投票中的占比
+  # V4.0: VWAP 偏离度
+  vwap_period: 20               # VWAP 计算周期
+  vwap_deviation_pct: 0.02      # 偏离 >2% 趋势信号打折
+  # V4.0: 动态否决权阈值
+  dynamic_veto_enable: true     # 用动态百分位替代固定阈值
+  dynamic_veto_pctile: 90       # 90th 百分位
+  # V4.0: 信号质量评分阈值
+  signal_quality_full: 60       # >= 此分满仓
+  signal_quality_half: 40       # >= 此分半仓，< 此分不开仓
   # ... 详细参数见 config.yaml 文件注释
 
 ai:                             # 🆕 V2.0: AI 情绪分析客户端
@@ -556,13 +651,21 @@ ai:                             # 🆕 V2.0: AI 情绪分析客户端
   base_url: "https://api.openai.com/v1"   # 或 DeepSeek / 零一万物
   model: "gpt-4o-mini"          # 推荐：gpt-4o-mini 或 deepseek-chat
 
-risk_v25:                       # 🆕 V2.5: 高级风控参数
+risk_v25:                       # 🆕 V2.5+V4.0: 高级风控参数
   trailing_stop_enable: true    # 追踪止损
   trailing_stop_trigger: 0.5    # 盈利达 ATR*此值后激活
   trailing_stop_distance: 0.8   # 回撤 ATR*此值更新 SL
   time_stop_enable: true        # 时间止损
   time_stop_bars: 24            # 最多持仓 N 根 K 线
   dynamic_position_enable: true # 动态仓位
+  # V4.0 新增:
+  drawdown_warning_pct: 0.03    # 3% 回撤 → 仓位 75%
+  drawdown_reduce_pct: 0.05     # 5% 回撤 → 仓位 50%
+  drawdown_halt_pct: 0.08       # 8% 回撤 → 停止交易
+  equity_curve_enable: true     # Equity Curve Trading 开关
+  equity_ema_period: 10         # 资金曲线 EMA 周期
+  equity_below_ema_scale: 0.6   # 低于 EMA 时仓位缩放
+  max_daily_trades: 8           # 每日最多开仓次数
 
 api:
   host: "0.0.0.0"
@@ -897,6 +1000,69 @@ runner.py 内置网络错误分类（`_classify_error`）：
 | 策略层纯信号 | 策略不碰资金/仓位/交易所，易于回测和测试 |
 | config.yaml 热更新 | 修改风控参数无需重启服务（但 Bot 启动时读取的参数需重启 Bot 生效） |
 | 每用户独立线程 | 用户间完全隔离：独立 RiskManager、exchange 实例、持仓状态 |
+
+---
+
+## 17. 常见问题 (FAQ)
+
+### Q1: AUTO 模式需要 AI/OpenAI 服务吗？
+
+**不需要。** AUTO 模式的核心决策完全基于：
+- 纯数学计算：ADX、EMA、布林带、ATR、VWAP、RSI 等技术指标
+- OKX 公开 API：资金费率、OI（持仓量）— 免费且无需额外 API Key
+- 多时间框架聚合：1h→4h K 线聚合后计算 EMA 方向
+
+AI 情绪分析（`ai_client.py`）是**可选增强模块**，默认关闭（`news_weight: 0.0`、`ai.api_key: ""`）。如需启用：
+1. 在 `config.yaml` 中填写 `ai.api_key`（支持 OpenAI / DeepSeek 等）
+2. 将 `selector.news_weight` 改为 0.1~0.3
+3. 重启 Bot 即可
+
+### Q2: AUTO 模式需要什么运行环境？
+
+| 需求 | 是否必须 | 说明 |
+|------|----------|------|
+| VPS（云服务器） | ✅ 必须 | Bot 需要 24/7 在线运行，推荐 Ubuntu 20.04+ |
+| OKX API Key | ✅ 必须 | 在 OKX 创建 API Key（模拟盘或实盘） |
+| Python 3.11+ | ✅ 必须 | 运行后端 + Bot 主循环 |
+| Node.js 18+ | ⚡ 仅部署时 | 构建前端（`npm run build`） |
+| AI API Key | ❌ 不需要 | 新闻情绪分析可选，默认关闭 |
+| 付费外部数据 | ❌ 不需要 | 链上数据（资金费率/OI）来自 OKX 公开 API |
+
+### Q3: 信号质量评分各维度的含义？
+
+| 维度 | 满分 | 数据源 | 说明 |
+|------|------|--------|------|
+| 技术面置信度 | 30 | ADX/EMA/BB/ATR/Vol/VWAP | 技术指标的综合确定性 |
+| 多源一致性 | 25 | 技术+链上+新闻+MTF | 多个独立来源方向一致 = 高质量 |
+| 链上数据质量 | 20 | 资金费率+OI | OKX 公开 API |
+| MTF方向确认 | 15 | 4h 级别 EMA | 高时间框架过滤，冲突时扣分 |
+| 波动率环境 | 10 | BB宽度/ATR水平 | 波动率适中 = 更适合交易 |
+
+### Q4: V4.0 的动态风险预算如何工作？
+
+最终有效风险 = 基础风险 × Kelly乘数 × 回撤缩放 × Equity曲线缩放 × Regime缩放
+
+举例：基础 1%，近期胜率 50%，回撤 4%（警告），资金曲线正常，regime 高置信：
+```
+= 1% × 1.0 × 0.75 × 1.0 × 1.0 = 0.75% 有效风险
+```
+
+举例：基础 1%，近期胜率 30%，回撤 6%，资金曲线低于EMA，regime 低置信：
+```
+= 1% × 0.6 × 0.5 × 0.6 × 0.6 = 0.108% 有效风险
+```
+
+这种多因子叠加确保在不利条件下大幅降低风险暴露。
+
+### Q5: Regime 切换时旧仓位怎么处理？
+
+| 切换方向 | 操作 | 紧急度 |
+|----------|------|--------|
+| BULL → BEAR | 立即市价平多 | 1.0 |
+| BEAR → BULL | 立即市价平空 | 1.0 |
+| BULL → RANGING | 平多但不紧急 | 0.5 |
+| BEAR → RANGING | 平空但不紧急 | 0.5 |
+| BULL/BEAR → WAIT | 收紧止损 50%（不平仓） | 0.3 |
 
 ---
 
