@@ -151,7 +151,7 @@ async def ws_status(websocket: WebSocket, token: str = ""):
             today_str = datetime.now().strftime("%Y-%m-%d")
             row2 = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(pnl),0) FROM trade_history "
-                "WHERE user_id=? AND timestamp LIKE ? AND action='平仓'",
+                "WHERE user_id=? AND entry_time LIKE ? AND status='closed'",
                 (uid, today_str + "%")
             ).fetchone()
             if row2:
