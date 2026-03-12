@@ -183,8 +183,27 @@ def init_db():
             '''CREATE INDEX IF NOT EXISTS idx_strat_perf_user_strat
             ON strategy_performance(user_id, strategy_name)''',
         ]),
+        (4, "V3.5: trade_history 升级为 entry/exit 模型", [
+            "DROP TABLE IF EXISTS trade_history",
+            '''CREATE TABLE IF NOT EXISTS trade_history (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL DEFAULT 0,
+                symbol      TEXT,
+                side        TEXT,
+                amount      REAL,
+                entry_price REAL,
+                exit_price  REAL,
+                pnl         REAL DEFAULT 0.0,
+                fee         REAL DEFAULT 0.0,
+                entry_time  TEXT,
+                exit_time   TEXT,
+                status      TEXT DEFAULT 'open'
+            )''',
+            '''CREATE INDEX IF NOT EXISTS idx_trade_user_time
+            ON trade_history(user_id, entry_time)''',
+        ]),
         # ── 未来新增迁移追加在这里 ──────────────────────────────────────────
-        # (4, "xxx", ["ALTER TABLE ..."]),
+        # (5, "xxx", ["ALTER TABLE ..."]),
     ]
 
     for version, desc, sqls in _MIGRATIONS:
