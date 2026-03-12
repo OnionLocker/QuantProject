@@ -21,10 +21,10 @@ _GLOBAL_CHAT_ID = os.getenv('TG_CHAT_ID',   '').strip("'\" ")
 _TIMEOUT = 10   # 请求超时秒数
 
 
-def _do_send(token: str, chat_id: str, message: str) -> bool:
-    """底层发送函数，不依赖任何全局状态。"""
+def _do_send(token: str, chat_id: str, message: str) -> tuple[bool, str]:
+    """底层发送函数，不依赖任何全局状态。返回 (ok, detail)。"""
     if not token or not chat_id:
-        return False
+        return False, "Token 或 Chat ID 为空"
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
         resp = requests.post(
@@ -32,9 +32,14 @@ def _do_send(token: str, chat_id: str, message: str) -> bool:
             json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
             timeout=_TIMEOUT,
         )
-        return resp.status_code == 200
-    except Exception:
-        return False
+        if resp.status_code == 200:
+            return True, "ok"
+        try:
+            return False, resp.text[:500]
+        except Exception:
+            return False, f"HTTP {resp.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 
 def send_telegram_msg(message: str) -> bool:
@@ -42,9 +47,9 @@ def send_telegram_msg(message: str) -> bool:
     if not _GLOBAL_TOKEN or not _GLOBAL_CHAT_ID:
         print("⚠️ [Telegram] 未配置全局 Token/Chat ID，跳过推送")
         return False
-    ok = _do_send(_GLOBAL_TOKEN, _GLOBAL_CHAT_ID, message)
+    ok, detail = _do_send(_GLOBAL_TOKEN, _GLOBAL_CHAT_ID, message)
     if not ok:
-        print("❌ [Telegram] 全局推送失败")
+        print(f"❌ [Telegram] 全局推送失败: {detail}")
     return ok
 
 
@@ -62,9 +67,9 @@ def make_notifier(token: str, chat_id: str):
         return None
 
     def _send(message: str) -> bool:
-        ok = _do_send(token, chat_id, message)
+        ok, detail = _do_send(token, chat_id, message)
         if not ok:
-            print(f"❌ [Telegram] 推送失败 (chat_id={chat_id[:6]}...)")
+            print(f"❌ [Telegram] 推送失败 (chat_id={chat_id[:6]}...): {detail}")
         return ok
 
     return _send
@@ -139,11 +144,11 @@ def test_notify(token: str, chat_id: str) -> tuple[bool, str]:
     """
     if not token or not chat_id:
         return False, "Token 或 Chat ID 不能为空"
-    ok = _do_send(token, chat_id,
+    ok, detail = _do_send(token, chat_id,
                   "🤖 <b>QuantBot 通知测试</b>\n✅ Telegram 配置成功！")
     if ok:
         return True, "发送成功"
-    return False, "发送失败，请检查 Token 和 Chat ID 是否正确"
+    return False, f"发送失败：{detail}"
 
 
 def test_webhook(url: str) -> tuple[bool, str]:

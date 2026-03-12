@@ -196,6 +196,34 @@ def _resolve_config(user_id: int) -> dict:
 # ── OKX 工具函数（per-user exchange 实例）───────────────────────────────────
 
 def _get_swap_usdt(ex) -> float:
+    """获取可用 USDT。
+    优先走 OKX 原始账户接口，避免模拟盘下 ccxt.fetch_balance() 的异常结构问题。
+    """
+    def _f(v):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+    # 1) 优先走 OKX 原始账户接口
+    try:
+        raw = ex.privateGetAccountBalance()
+        data = (raw or {}).get('data') or []
+        if data:
+            details = (data[0] or {}).get('details') or []
+            for item in details:
+                if (item or {}).get('ccy') == 'USDT':
+                    v = _f((item or {}).get('availBal'))
+                    if v > 0:
+                        return v
+                    # 退一步取 eq / cashBal
+                    v = _f((item or {}).get('eq')) or _f((item or {}).get('cashBal'))
+                    if v > 0:
+                        return v
+    except Exception:
+        pass
+
+    # 2) 回退到 ccxt balance
     for acc_type in ("swap", "trading", "future"):
         try:
             bal = ex.fetch_balance(params={"type": acc_type})
@@ -213,12 +241,56 @@ def _get_swap_usdt(ex) -> float:
 
 def _detect_pos_mode(ex) -> str:
     try:
-        cfg = ex.private_get_account_config()
+        # 优先走 OKX 原始接口（ccxt snake_case/camelCase 兼容不一致时更稳）
+        if hasattr(ex, 'privateGetAccountConfig'):
+            cfg = ex.privateGetAccountConfig()
+        else:
+            cfg = ex.private_get_account_config()
         data = (cfg or {}).get("data") or []
         mode = (data[0] or {}).get("posMode", "")
         return "hedge" if mode == "long_short_mode" else "net"
     except Exception:
         return "net"
+
+
+def _symbol_to_okx_inst_id(symbol: str) -> str:
+    s = (symbol or '').upper()
+    if ':' in s:
+        s = s.split(':', 1)[0]
+    s = s.replace('/', '-')
+    if not s.endswith('-SWAP'):
+        s = s + '-SWAP'
+    return s
+
+
+def _timeframe_to_okx_bar(tf: str) -> str:
+    mp = {
+        '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+        '1h': '1H', '2h': '2H', '4h': '4H', '6h': '6H', '12h': '12H',
+        '1d': '1D', '1w': '1W'
+    }
+    return mp.get((tf or '1h').lower(), '1H')
+
+
+def _fetch_ohlcv_safe(ex, symbol: str, timeframe: str, limit: int = 200):
+    """优先 ccxt.fetch_ohlcv；若 demo 环境异常，则回退 OKX 原始 K 线接口。"""
+    try:
+        return ex.fetch_ohlcv(symbol, timeframe, limit=limit)
+    except Exception:
+        try:
+            inst_id = _symbol_to_okx_inst_id(symbol)
+            bar = _timeframe_to_okx_bar(timeframe)
+            resp = ex.publicGetMarketCandles({'instId': inst_id, 'bar': bar, 'limit': str(limit)})
+            data = (resp or {}).get('data') or []
+            # OKX: [ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]
+            rows = []
+            for r in reversed(data):
+                rows.append([
+                    int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])
+                ])
+            return rows
+        except Exception:
+            raise
 
 
 def _place_algo(ex, symbol: str, side: str, amount: float,
@@ -267,7 +339,7 @@ def _cancel_all_algo(ex, symbol: str, logger=None, notify=None, tag: str = ""):
                 pass
 
 
-def _live_position_amount(ex, symbol: str) -> float:
+def _live_position_amount(ex, symbol: str, logger=None, tag: str = "") -> float:
     """
     查询交易所当前持仓合约张数。
     返回 >=0 表示实际持仓，-1 表示查询失败（不能误判为空仓）。
@@ -279,7 +351,9 @@ def _live_position_amount(ex, symbol: str) -> float:
             for p in positions
             if p.get("symbol") == symbol and float(p.get("contracts") or 0) > 0
         )
-    except Exception:
+    except Exception as e:
+        if logger:
+            logger.warning(f"{tag} 持仓查询异常: {e}")
         return -1.0
 
 
@@ -776,7 +850,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
             # ── 仓位核对（检测被动平仓）──────────────────────────────────────
             if state["position_amount"] > 0:
-                live_amt = _live_position_amount(ex, SYMBOL)
+                live_amt = _live_position_amount(ex, SYMBOL, logger=logger, tag=tag)
 
                 if live_amt == -1.0:
                     # 查询失败，累计计数并按需告警
@@ -853,7 +927,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
             # ── K 线 & 信号 ──────────────────────────────────────────────────
             # Fix: limit 动态适配策略预热期，确保实盘信号窗口与回测一致
             kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
-            ohlcv = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=kline_limit)
+            ohlcv = _fetch_ohlcv_safe(ex, SYMBOL, TIMEFRAME, limit=kline_limit)
             df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
             df.set_index("timestamp", inplace=True)
@@ -1001,7 +1075,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     strategy = new_strategy
                     # 新策略可能需要更多K线，重新拉取
                     kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
-                    ohlcv = ex.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=kline_limit)
+                    ohlcv = _fetch_ohlcv_safe(ex, SYMBOL, TIMEFRAME, limit=kline_limit)
                     df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
                     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
                     df.set_index("timestamp", inplace=True)

@@ -482,16 +482,37 @@ def record_trade(user_id=None, side=None, price=None, amount=None,
     多用户版：record_trade(user_id=1, side='buy', price=..., amount=..., ...)
     单用户版：record_trade(side='buy', price=..., amount=..., ...)
               ← user_id 不传，自动为 0
+
+    当前统一写入新结构 trade_history：
+    - entry_time / entry_price / status / fee
+    - action / reason 仅做兼容映射，不再直接落旧字段
     """
     _user_id = 0 if (user_id is None) else int(user_id)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    _side = str(side or '')
+    _action = str(action or '')
+    _price = float(price or 0)
+    _amount = float(amount or 0)
+    _status = 'closed' if ('平仓' in _action or _action.lower() == 'close') else 'open'
+    _fee = 0.0
     conn = get_conn()
     conn.execute('''
         INSERT INTO trade_history
-          (user_id, timestamp, symbol, side, action, price, amount, pnl, reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (_user_id, now, symbol, side, action,
-          float(price or 0), float(amount or 0), pnl, reason))
+          (user_id, symbol, side, amount, entry_price, exit_price, pnl, fee, entry_time, exit_time, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        _user_id,
+        symbol,
+        _side,
+        _amount,
+        _price,
+        _price if _status == 'closed' else None,
+        float(pnl or 0),
+        _fee,
+        now,
+        now if _status == 'closed' else None,
+        _status,
+    ))
     conn.commit()
 
 
