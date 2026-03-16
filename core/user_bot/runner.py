@@ -813,7 +813,13 @@ def run_user_bot(bot_state, override_strategy: str = None):
         ex.set_leverage(LEVERAGE, SYMBOL, params={"mgnMode": "cross"})
         logger.info(f"{tag} 杠杆已设为 {LEVERAGE}x")
     except Exception as e:
-        logger.warning(f"{tag} 设置杠杆失败（可能已设置）: {e}")
+        msg = str(e)
+        # 已知 OKX/ccxt 在某些环境下 set_leverage 会抛出 NoneType + str，
+        # 但实际不一定影响后续交易；这里仅记录为兼容性警告，避免误判为未知故障。
+        if 'NoneType' in msg and '+' in msg:
+            logger.warning(f"{tag} 设置杠杆遇到 OKX/ccxt 兼容异常（已跳过）: {msg}")
+        else:
+            logger.warning(f"{tag} 设置杠杆失败（可能已设置）: {e}")
 
     import pandas as pd
     state = _load_state(user_id)
