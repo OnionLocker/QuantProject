@@ -88,6 +88,7 @@ export const marketApi = {
 
 export const newsSyncApi = {
   status: () => api.get('/api/news-sync/status'),
+  run:    () => api.post('/api/news-sync/run'),
 }
 
 export default api

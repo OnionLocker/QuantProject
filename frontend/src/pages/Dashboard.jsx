@@ -546,7 +546,24 @@ export default function Dashboard({ username }) {
       {/* ── 新闻同步状态卡片 ── */}
       {newsSync?.latest && (
         <div className="card mb-16">
-          <div className="card-header">新闻同步状态</div>
+          <div className="card-header" style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <span>新闻同步状态</span>
+            <button
+              className="btn btn-secondary"
+              onClick={async () => {
+                try {
+                  await newsSyncApi.run()
+                  const r = await newsSyncApi.status()
+                  setNewsSync(r.data)
+                  const s = await marketApi.sentiment()
+                  setSentiment(s.data)
+                } catch {}
+              }}
+              style={{ padding:'6px 10px', fontSize:12 }}
+            >
+              立即同步
+            </button>
+          </div>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)' }}>
             <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
               <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>启用状态</div>

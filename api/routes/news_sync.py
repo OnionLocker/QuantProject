@@ -128,6 +128,36 @@ def ingest_news_sync(payload: NewsSyncPayload) -> dict[str, Any]:
     }
 
 
+@router.post("/run")
+def run_news_sync_now() -> dict[str, Any]:
+    cfg = get_config() or {}
+    news_sync = cfg.get("news_sync", {}) or {}
+    if not news_sync.get("enable", False):
+        raise HTTPException(status_code=403, detail="news_sync disabled")
+
+    try:
+        import subprocess
+        import os
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        py = os.path.join(project_root, 'venv', 'bin', 'python')
+        runner = os.path.join(project_root, 'scripts', 'news_sync_runner.py')
+        proc = subprocess.run(
+            [py, runner],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stdout": (proc.stdout or '')[:2000],
+            "stderr": (proc.stderr or '')[:2000],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/status")
 def get_news_sync_status() -> dict[str, Any]:
     cfg = get_config() or {}
