@@ -31,6 +31,7 @@ from api.routes.data        import router as data_router
 from api.routes.notify      import router as notify_router
 from api.routes.user_config import router as user_config_router
 from api.routes.market      import router as market_router
+from api.routes.news_sync   import router as news_sync_router
 from api.auth.jwt_handler import get_current_user
 from core.user_bot import manager as bot_mgr
 from execution.db_handler import init_db
@@ -89,6 +90,7 @@ app.include_router(data_router)
 app.include_router(notify_router)
 app.include_router(user_config_router)
 app.include_router(market_router)
+app.include_router(news_sync_router)
 
 
 @app.get("/api/health")

@@ -134,6 +134,18 @@ api:
   # 例如: ["https://your-domain.com", "https://admin.your-domain.com"]
   cors_origins: ["*"]
 
+# ── OpenClaw 新闻同步（外部新闻面输入）──────────────────────────────────────
+# 当 strategy.selector.news_weight > 0 时建议启用。
+# OpenClaw 按固定频率抓新闻、分析后写回 QuantBot，selector 直接读 news_summary。
+news_sync:
+  enable: true                       # 是否允许外部新闻同步
+  provider: "openclaw"              # 预留字段：当前固定为 openclaw
+  interval_hours: 4                  # 每隔多少小时抓取一次新闻
+  lookback_hours: 12                 # 回看最近多少小时的重要新闻
+  max_results: 12                    # 单次最多分析多少条新闻
+  min_confidence: 0.55               # 低于此置信度仅做摘要，不建议影响策略
+  symbols: ["BTC", "Bitcoin", "ETF", "Fed", "crypto"]
+
 # ── V2.0: AI 情绪分析客户端 ─────────────────────────────────────────────────
 # 支持 OpenAI / DeepSeek / 零一万物等 OpenAI 兼容接口
 # 也可通过环境变量 AI_API_KEY / AI_BASE_URL / AI_MODEL 配置
