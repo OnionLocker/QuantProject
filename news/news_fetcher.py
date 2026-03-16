@@ -47,7 +47,9 @@ def _get_news_conn() -> sqlite3.Connection:
 # ── DB：创建 news_cache 表 ────────────────────────────────────────────────────
 
 def _ensure_table():
-    conn = sqlite3.connect(_DB_PATH)
+    conn = sqlite3.connect(_DB_PATH, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS news_sentiment (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,20 +248,8 @@ def _normalize(score: float, max_abs: float = 5.0) -> float:
 
 # ── 主函数：抓取所有源并写入DB ──────────────────────────────────────────────────
 
-def fetch_and_analyze(force: bool = False) -> dict:
-    """
-    抓取所有启用的新闻源，进行情绪分析，结果写入 news_summary 表。
-
-    :param force: True 时忽略缓存强制刷新
-    :return: {
-        "crypto_score":   float,   # [-1, 1]
-        "macro_score":    float,   # [-1, 1]
-        "combined_score": float,   # [-1, 1]
-        "regime_hint":    str,     # 'bull'|'bear'|'ranging'|'unknown'
-        "summary_text":   str,
-        "article_count":  int,
-    }
-    """
+def analyze_news(force: bool = False) -> dict:
+    """抓取并分析新闻，返回结果；逐条新闻仍写 news_sentiment，但不写 news_summary。"""
     _ensure_table()
     cfg = _load_config()
     sentiment_cfg = cfg.get("sentiment_config", {})
@@ -274,12 +264,10 @@ def fetch_and_analyze(force: bool = False) -> dict:
         cfg.get("macro_sources", [])
     )
 
-    crypto_scores: list[tuple[float, float]] = []  # (score, weight)
+    crypto_scores: list[tuple[float, float]] = []
     macro_scores:  list[tuple[float, float]] = []
-    all_headlines: list[str] = []
     article_count = 0
-
-    conn = sqlite3.connect(_DB_PATH)
+    sampled_headlines: list[dict] = []
 
     for source in all_sources:
         if not source.get("enabled", False):
@@ -293,12 +281,8 @@ def fetch_and_analyze(force: bool = False) -> dict:
             logger.debug(f"跳过（缓存有效）: {name}")
             continue
 
-        # 抓取标题
         if source["type"] == "rss":
-            headlines = _fetch_rss(
-                source["url"],
-                source.get("max_items", 10)
-            )
+            headlines = _fetch_rss(source["url"], source.get("max_items", 10))
         elif source["type"] == "json_api":
             headlines = _fetch_json_api(
                 source["url"],
@@ -315,9 +299,7 @@ def fetch_and_analyze(force: bool = False) -> dict:
 
         _update_fetch_cache(name)
         article_count += len(headlines)
-        all_headlines.extend(headlines[:ai_max_items])
 
-        # 对每条新闻做关键词评分
         source_scores = []
         ai_candidates = []
         for h in headlines:
@@ -326,29 +308,20 @@ def fetch_and_analyze(force: bool = False) -> dict:
                 source_scores.append(kw_score)
             elif mode == "ai":
                 ai_candidates.append(h)
-            else:  # hybrid
+            else:
                 if abs(kw_score) >= ai_threshold:
                     ai_candidates.append(h)
-                    source_scores.append(kw_score)  # 先用关键词，AI结果之后覆盖
+                    source_scores.append(kw_score)
                 else:
                     source_scores.append(kw_score)
 
-            # 写入逐条记录
-            conn.execute(
-                "INSERT INTO news_sentiment (fetched_at, source_name, category, headline, sentiment, method) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (datetime.now().isoformat(), name, category, h[:200],
-                 _normalize(kw_score), "keyword")
-            )
+            if len(sampled_headlines) < 12:
+                sampled_headlines.append({"title": h[:200], "source": name})
 
-        # AI深度分析（hybrid/ai模式）
-        ai_score = 0.0
         if ai_candidates and mode in ("ai", "hybrid"):
             ai_raw = _ai_sentiment_analysis(ai_candidates, sentiment_cfg)
-            ai_score = ai_raw
-            source_scores.append(ai_score * 3.0)  # AI分析权重加倍
+            source_scores.append(ai_raw * 3.0)
 
-        # 源级别聚合：取平均
         if source_scores:
             avg_raw = sum(source_scores) / len(source_scores)
             norm_score = _normalize(avg_raw)
@@ -357,10 +330,6 @@ def fetch_and_analyze(force: bool = False) -> dict:
             else:
                 macro_scores.append((norm_score, weight))
 
-    conn.commit()
-    conn.close()
-
-    # ── 加权聚合 ─────────────────────────────────────────────────────────────
     def weighted_avg(scores_weights):
         if not scores_weights:
             return 0.0
@@ -372,7 +341,6 @@ def fetch_and_analyze(force: bool = False) -> dict:
     crypto_score = weighted_avg(crypto_scores)
     macro_score  = weighted_avg(macro_scores)
 
-    # 综合分数：加密 60% + 宏观 40%
     if crypto_scores and macro_scores:
         combined = crypto_score * 0.6 + macro_score * 0.4
     elif crypto_scores:
@@ -382,7 +350,6 @@ def fetch_and_analyze(force: bool = False) -> dict:
     else:
         combined = 0.0
 
-    # ── 推断市场倾向 ─────────────────────────────────────────────────────────
     if combined >= bull_thresh:
         regime_hint = "bull"
     elif combined <= bear_thresh:
@@ -394,38 +361,37 @@ def fetch_and_analyze(force: bool = False) -> dict:
         regime_hint = "unknown"
 
     summary_text = (
-        f"新闻情绪: crypto={crypto_score:+.2f} macro={macro_score:+.2f} "
-        f"综合={combined:+.2f} → 倾向={regime_hint} "
-        f"(共{article_count}条)"
+        f"新闻情绪: crypto={crypto_score:+.2f} macro={macro_score:+.2f} 综合={combined:+.2f} → 倾向={regime_hint} (共{article_count}条)"
     )
     logger.info(summary_text)
 
-    # 写入汇总
-    conn = sqlite3.connect(_DB_PATH)
+    return {
+        "crypto_score": round(crypto_score, 3),
+        "macro_score": round(macro_score, 3),
+        "combined_score": round(combined, 3),
+        "regime_hint": regime_hint,
+        "summary_text": summary_text,
+        "article_count": article_count,
+        "headlines": sampled_headlines,
+    }
+
+
+def fetch_and_analyze(force: bool = False) -> dict:
+    """兼容旧接口：先分析，再写入 news_summary。"""
+    result = analyze_news(force=force)
+    conn = _get_news_conn()
     try:
         conn.execute(
-            "INSERT INTO news_summary (created_at, crypto_score, macro_score, "
-            "combined_score, regime_hint, summary_text) VALUES (?,?,?,?,?,?)",
-            (datetime.now().isoformat(), crypto_score, macro_score,
-             combined, regime_hint, summary_text)
+            "INSERT INTO news_summary (created_at, crypto_score, macro_score, combined_score, regime_hint, summary_text) VALUES (?,?,?,?,?,?)",
+            (datetime.now().isoformat(), result['crypto_score'], result['macro_score'], result['combined_score'], result['regime_hint'], result['summary_text'])
         )
-        # 只保留最近 200 条汇总记录
         conn.execute(
-            "DELETE FROM news_summary WHERE id NOT IN "
-            "(SELECT id FROM news_summary ORDER BY id DESC LIMIT 200)"
+            "DELETE FROM news_summary WHERE id NOT IN (SELECT id FROM news_summary ORDER BY id DESC LIMIT 200)"
         )
         conn.commit()
     finally:
         conn.close()
-
-    return {
-        "crypto_score":   round(crypto_score, 3),
-        "macro_score":    round(macro_score, 3),
-        "combined_score": round(combined, 3),
-        "regime_hint":    regime_hint,
-        "summary_text":   summary_text,
-        "article_count":  article_count,
-    }
+    return result
 
 
 def get_latest_sentiment() -> Optional[dict]:
