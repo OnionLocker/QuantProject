@@ -19,11 +19,19 @@ if command -v systemctl &>/dev/null && systemctl is-active --quiet quantbot 2>/d
   STOPPED=1
 fi
 
-# 兜底：直接 kill uvicorn 进程
+# 兜底：直接 kill uvicorn 进程（兼容系统 Python / venv 启动）
 if pgrep -f "uvicorn api.server:app" > /dev/null; then
   pkill -f "uvicorn api.server:app"
   sleep 1
   ok "uvicorn 进程已停止"
+  STOPPED=1
+fi
+
+# 再兜底：匹配项目目录下的 uvicorn 命令行
+if pgrep -f "/root/QuantProject/.*/uvicorn api.server:app" > /dev/null; then
+  pkill -f "/root/QuantProject/.*/uvicorn api.server:app"
+  sleep 1
+  ok "项目 uvicorn 进程已停止"
   STOPPED=1
 fi
 

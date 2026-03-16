@@ -36,8 +36,10 @@ if [ ! -d "$PROJECT_DIR/frontend/dist" ]; then
   warn "请先运行 bash deploy.sh 构建前端"
 fi
 
-# 检查 Python
-if command -v python3.11 &>/dev/null; then
+# 检查 Python：优先使用项目虚拟环境，避免系统 Python 缺依赖
+if [ -x "$PROJECT_DIR/venv/bin/python" ]; then
+  PYTHON="$PROJECT_DIR/venv/bin/python"
+elif command -v python3.11 &>/dev/null; then
   PYTHON=python3.11
 elif command -v python3 &>/dev/null; then
   PYTHON=python3
