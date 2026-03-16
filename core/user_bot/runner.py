@@ -198,6 +198,8 @@ def _resolve_config(user_id: int) -> dict:
 def _get_swap_usdt(ex) -> float:
     """获取可用 USDT。
     优先走 OKX 原始账户接口，避免模拟盘下 ccxt.fetch_balance() 的异常结构问题。
+    已知 Bug：ccxt 在 OKX 模拟盘下 fetch_balance() 可能抛出
+    TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'
     """
     def _f(v):
         try:
@@ -210,20 +212,26 @@ def _get_swap_usdt(ex) -> float:
         raw = ex.privateGetAccountBalance()
         data = (raw or {}).get('data') or []
         if data:
-            details = (data[0] or {}).get('details') or []
-            for item in details:
-                if (item or {}).get('ccy') == 'USDT':
-                    v = _f((item or {}).get('availBal'))
-                    if v > 0:
-                        return v
-                    # 退一步取 eq / cashBal
-                    v = _f((item or {}).get('eq')) or _f((item or {}).get('cashBal'))
-                    if v > 0:
-                        return v
+            d0 = data[0] or {}
+            # 尝试从 totalEq / adjEq 获取总权益（模拟盘下也可用）
+            total_eq = _f(d0.get('totalEq')) or _f(d0.get('adjEq'))
+            if total_eq > 0:
+                # 优先取 USDT 可用余额
+                details = d0.get('details') or []
+                for item in details:
+                    if (item or {}).get('ccy') == 'USDT':
+                        v = _f((item or {}).get('availBal'))
+                        if v > 0:
+                            return v
+                        v = _f((item or {}).get('eq')) or _f((item or {}).get('cashBal'))
+                        if v > 0:
+                            return v
+                # 没有单独 USDT 条目时，用总权益近似
+                return total_eq
     except Exception:
         pass
 
-    # 2) 回退到 ccxt balance
+    # 2) 回退到 ccxt balance（已知模拟盘可能触发 TypeError）
     for acc_type in ("swap", "trading", "future"):
         try:
             bal = ex.fetch_balance(params={"type": acc_type})
@@ -236,7 +244,20 @@ def _get_swap_usdt(ex) -> float:
         bal = ex.fetch_balance()
         return float(bal.get("USDT", {}).get("free", 0))
     except Exception:
-        return 0.0
+        pass
+
+    # 3) 最后手段：fetch_accounts 看有没有余额信息
+    try:
+        accounts = ex.fetch_accounts()
+        for acc in (accounts or []):
+            if acc.get("currency") == "USDT":
+                v = _f(acc.get("free") or acc.get("total"))
+                if v > 0:
+                    return v
+    except Exception:
+        pass
+
+    return 0.0
 
 
 def _detect_pos_mode(ex) -> str:
@@ -845,8 +866,26 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
             # ── 余额 ─────────────────────────────────────────────────────────
             usdt_free = _get_swap_usdt(ex)
+            _zbc_key = '_zbc_' + str(user_id)
             if usdt_free > 0:
                 record_balance(user_id, usdt_free)
+                if getattr(run_user_bot, _zbc_key, 0) > 0:
+                    setattr(run_user_bot, _zbc_key, 0)
+            else:
+                _zero_bal_count = getattr(run_user_bot, _zbc_key, 0) + 1
+                setattr(run_user_bot, _zbc_key, _zero_bal_count)
+                logger.warning(f"{tag} ⚠️ 余额获取为 0（连续第 {_zero_bal_count} 次）")
+                if _zero_bal_count == 5:
+                    # 连续 5 轮（约 25 分钟）拿不到余额，推送一次通知
+                    alert_key = f"{user_id}:zero_balance"
+                    if _should_alert(alert_key, 3600):
+                        notify(
+                            f"⚠️ <b>{username}</b> 连续 {_zero_bal_count} 轮余额为 0，"
+                            f"无法开仓。\n请检查：\n"
+                            f"• 模拟盘/实盘 Key 是否匹配\n"
+                            f"• 合约账户是否有 USDT\n"
+                            f"• API Key 权限是否包含「读取」"
+                        )
 
             # ── 仓位核对（检测被动平仓）──────────────────────────────────────
             if state["position_amount"] > 0:
@@ -1437,10 +1476,20 @@ def run_user_bot(bot_state, override_strategy: str = None):
             continue
 
         except Exception as e:
-            logger.error(f"{tag} 运行异常: {e}")
+            import traceback
+            tb_str = traceback.format_exc()
+            logger.error(f"{tag} 运行异常: {e}\n{tb_str}")
             alert_key = f"{user_id}:generic_error:{type(e).__name__}"
             if _should_alert(alert_key, 300):
-                notify(f"⚠️ <b>{username} Bot 异常</b>\n{str(e)[:200]}")
+                # 推送错误信息时附带出错位置，便于远程排查
+                tb_lines = tb_str.strip().split('\n')
+                # 取最后几行（最相关的调用栈）
+                short_tb = '\n'.join(tb_lines[-4:]) if len(tb_lines) > 4 else tb_str
+                notify(
+                    f"⚠️ <b>{username} Bot 异常</b>\n"
+                    f"{str(e)[:200]}\n\n"
+                    f"<pre>{short_tb[:300]}</pre>"
+                )
             stop_ev.wait(10)
             continue
 
