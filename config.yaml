@@ -23,13 +23,13 @@ strategy:
 selector:
   # 技术面参数
   adx_period:       14
-  adx_bull_thresh:  22         # ADX > 此值认为有趋势（BTC 推荐 22，加密市场 ADX 普遍偏低）
-  adx_range_thresh: 18         # ADX < 此值认为震荡
-  ema_short:        14         # 快速 EMA（BTC 1h 推荐 14）
-  ema_mid:          40         # 中速 EMA（BTC 1h 推荐 40）
-  ema_long:         120        # 慢速 EMA（BTC 1h 推荐 120 ≈ 5天，比 200 更灵敏）
+  adx_bull_thresh:  20         # BTC 1h 放宽趋势识别，减少长期卡在 WAIT/HOLD
+  adx_range_thresh: 16         # 震荡阈值略放宽，避免过早判成 range
+  ema_short:        12         # 快速 EMA 更灵敏，适合 BTC 1h 节奏
+  ema_mid:          36         # 中速 EMA 略收紧，提升切换反应速度
+  ema_long:         96         # 慢速 EMA 从 120 降到 96，降低趋势确认滞后
   bb_period:        20
-  bb_squeeze_pct:   0.03       # 布林带宽度/中轨 < 此值认为挤压
+  bb_squeeze_pct:   0.035      # 稍放宽挤压判定，更容易识别突破前环境
 
   # 权重配置
   tech_weight:      1.0        # 技术面权重（AI情绪分析未接入时建议设为1.0）
@@ -39,10 +39,10 @@ selector:
   # 防抖：连续 N 轮确认才切换策略（避免频繁抖动）
   confirm_bars:     3             # 默认确认根数（兼容旧配置）
   # V3.0: 动态确认根数（根据置信度自适应）
-  confirm_bars_fast:    2         # 高置信度时只需 2 根确认（抓住快速行情）
-  confirm_bars_slow:    4         # 低置信度时需要 4 根确认（过滤假信号）
-  confirm_fast_thresh:  0.7       # 置信度 > 此值走快速通道
-  confirm_slow_thresh:  0.4       # 置信度 < 此值走慢速通道
+  confirm_bars_fast:    1         # BTC 1h 提高反应速度，高置信度直接确认
+  confirm_bars_slow:    3         # 低置信度也别拖太久
+  confirm_fast_thresh:  0.65      # 更容易进入快速确认
+  confirm_slow_thresh:  0.35      # 放宽慢速阈值
 
   # 各 regime 对应的策略名（必须在注册表中存在）
   strategy_bull:    "BULL"
@@ -52,21 +52,21 @@ selector:
 
   # V2.0: 资金费率 + OI 链上数据
   enable_market_extra: true          # 是否启用资金费率/OI 数据增强
-  funding_weight:     0.15           # 资金费率在综合评分中的权重
-  oi_weight:          0.10           # OI在综合评分中的权重
-  funding_extreme:    0.0005         # 极端资金费率阈值（>0.05%=极端）
-  oi_spike_pct:       0.10           # OI 变化幅度阈值（>10%=异常）
+  funding_weight:     0.10           # 降低链上辅助权重，减少对纯技术信号的压制
+  oi_weight:          0.08           # OI 保留但降权
+  funding_extreme:    0.0006         # 稍放宽极端费率阈值
+  oi_spike_pct:       0.12           # OI 变化幅度阈值放宽
   dynamic_news_weight: true          # 启用动态新闻权重（根据数据质量自动调整）
 
   # V3.0: 资金费率否决权（极端费率时强制 WAIT，保护性机制）
-  funding_veto_enable: true           # 是否启用否决权
-  funding_veto_mult:   2.0            # 费率 > extreme × 此倍数时触发（即 >0.1%）
+  funding_veto_enable: true           # 保留保护，但降低触发概率
+  funding_veto_mult:   2.5            # 更极端才否决，减少误伤趋势行情
   funding_veto_contra: true           # 只在费率与技术面方向冲突时否决（更精准）
 
   # V4.0: 多时间框架确认（MTF - 机构级 top-down analysis）
-  mtf_enable:        true             # 是否启用 4h 级别方向过滤
-  mtf_ema_period:    50               # 4h 级别 EMA 周期
-  mtf_weight:        0.15             # MTF 在加权投票中的占比
+  mtf_enable:        true             # 保留 4h 过滤，但减轻影响
+  mtf_ema_period:    34               # 4h EMA 更灵敏，适合 BTC 1h 联动
+  mtf_weight:        0.10             # 降低 MTF 压制，避免 1h 信号长期被盖掉
 
   # V4.0: VWAP 偏离度（均值回归压力评估）
   vwap_period:       20               # VWAP 计算周期
@@ -74,56 +74,56 @@ selector:
 
   # V4.0: 动态否决权阈值（基于近期费率分布自适应）
   dynamic_veto_enable:  true          # 是否用动态百分位替代固定阈值
-  dynamic_veto_pctile:  90            # 取近期费率绝对值的 90th 百分位
+  dynamic_veto_pctile:  92            # 提高百分位，减少动态否决过于频繁
 
   # V4.0: 信号质量评分阈值
-  signal_quality_full:  60            # >= 此分满仓
-  signal_quality_half:  40            # >= 此分半仓，< 此分不开仓
+  signal_quality_full:  55            # BTC 1h 降低满仓门槛，减少长期 HOLD
+  signal_quality_half:  35            # 放宽半仓门槛，让边缘信号也能试仓
 
   # 各策略的参数覆盖（BTC/USDT 1h 优化后的默认参数）
   # 如果不填则使用策略代码里的默认值，两者现在已经同步
   strategy_params:
     BULL:
-      ema_fast:      8          # 快线更灵敏
+      ema_fast:      8          # BTC 1h 保持灵敏
       ema_slow:      21
-      ema_trend:     40         # 趋势线 ≈ 不到2天
-      adx_threshold: 22         # 加密市场 ADX 普遍偏低
-      atr_sl_mult:   1.2        # 止损更紧凑（旧值 1.5 太远）
-      rr1:           1.5        # 止盈更快（旧值 2.0 导致持仓时间过长）
-      rsi_os:        38         # 牛市回调不会太深
-      cooldown:      4
+      ema_trend:     34         # 趋势线更灵敏，减少趋势确认滞后
+      adx_threshold: 20         # 放宽趋势触发
+      atr_sl_mult:   1.1        # 止损略紧，提高风险收益效率
+      rr1:           1.4        # 更容易止盈落袋
+      rsi_os:        42         # 回调买入条件放宽，避免一直等超深回踩
+      cooldown:      3
     BEAR:
       ema_fast:      8
       ema_slow:      21
-      ema_trend:     40
-      adx_threshold: 22
-      atr_sl_mult:   1.2
-      rr1:           1.5
-      rsi_ob:        62         # 熊市超买阈值降低
-      cooldown:      4
+      ema_trend:     34
+      adx_threshold: 20
+      atr_sl_mult:   1.1
+      rr1:           1.4
+      rsi_ob:        58         # 做空回落条件放宽
+      cooldown:      3
     RANGE:
       bb_period:     20
       bb_std:        2.0
-      squeeze_pct:   0.04             # 布林带宽度 < 4% 判定收缩
-      squeeze_lookback: 10            # 回看 10 根内是否有收缩
-      range_lookback:   20            # 区间高低点回看周期
-      adx_rise_thresh:  2.0           # ADX 上升幅度确认趋势启动
-      vol_mult:      1.3              # 突破成交量倍数
-      body_ratio_min: 55.0            # 突破K线实体占比
-      atr_sl_mult:   1.0              # 止损距离（比旧版宽一点，突破策略需要更大空间）
-      rr1:           1.5              # 止盈1倍数
-      rr2:           3.0              # 止盈2倍数
-      cooldown:      6                # 冷却期加长（突破后给行情发展空间）
-    BIG_CANDLE:
-      body_pct:      1.2        # 大阳线阈值降低（旧值 1.5，低波动期难触发）
-      vol_mult:      1.3        # 量能要求稍放松
-      body_ratio_min: 55.0      # 实体占比放宽
-      sl_mode:       1          # 改为最低价止损（更紧，旧值 0=开盘价）
-      atr_sl_mult:   1.2
-      rr1:           1.5
-      breakout_lookback: 16     # 回看 16h 而非 20h
-      high_pos_lookback: 48     # 高位过滤 2 天
+      squeeze_pct:   0.045            # 更容易识别收缩区间
+      squeeze_lookback: 12            # 稍放宽收缩回看窗口
+      range_lookback:   18            # 缩短区间回看，提高响应速度
+      adx_rise_thresh:  1.5           # 降低趋势启动门槛
+      vol_mult:      1.15             # 放宽突破量能要求
+      body_ratio_min: 50.0            # 放宽实体占比
+      atr_sl_mult:   1.0
+      rr1:           1.4
+      rr2:           2.6
       cooldown:      4
+    BIG_CANDLE:
+      body_pct:      0.9        # BTC 1h 更容易捕获有效突破K
+      vol_mult:      1.15       # 量能要求进一步放宽
+      body_ratio_min: 50.0      # 实体占比放宽
+      sl_mode:       1
+      atr_sl_mult:   1.1
+      rr1:           1.4
+      breakout_lookback: 12     # 缩短突破回看窗口
+      high_pos_lookback: 36     # 缩短高位过滤窗口
+      cooldown:      3
       enable_short:  1
 
 api:
