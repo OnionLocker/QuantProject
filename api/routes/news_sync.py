@@ -116,3 +116,42 @@ def ingest_news_sync(payload: NewsSyncPayload) -> dict[str, Any]:
         "combined_score": payload.combined_score,
         "headline_count": len(payload.headlines),
     }
+
+
+@router.get("/status")
+def get_news_sync_status() -> dict[str, Any]:
+    cfg = get_config() or {}
+    selector = cfg.get("selector", {}) or {}
+    news_sync = cfg.get("news_sync", {}) or {}
+
+    conn = sqlite3.connect(_db_path())
+    try:
+        row = conn.execute(
+            "SELECT created_at, crypto_score, macro_score, combined_score, regime_hint, summary_text FROM news_summary ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    latest = None
+    age_minutes = None
+    if row:
+        latest = {
+            "created_at": row[0],
+            "crypto_score": row[1],
+            "macro_score": row[2],
+            "combined_score": row[3],
+            "regime_hint": row[4],
+            "summary_text": row[5],
+        }
+        try:
+            age_minutes = round((datetime.now() - datetime.fromisoformat(row[0])).total_seconds() / 60, 1)
+        except Exception:
+            age_minutes = None
+
+    return {
+        "enabled_by_weight": (selector.get("news_weight", 0.0) or 0.0) > 0,
+        "news_weight": selector.get("news_weight", 0.0),
+        "news_sync": news_sync,
+        "latest": latest,
+        "age_minutes": age_minutes,
+    }
