@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Any, List, Optional
 import sqlite3
+import logging
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 from utils.config_loader import get_config
 
 router = APIRouter(prefix="/api/news-sync", tags=["news-sync"])
+logger = logging.getLogger("news_sync")
 
 
 class NewsHeadline(BaseModel):
@@ -108,6 +110,14 @@ def ingest_news_sync(payload: NewsSyncPayload) -> dict[str, Any]:
         conn.commit()
     finally:
         conn.close()
+
+    logger.info(
+        "[OpenClaw News Sync] 写入成功 created_at=%s regime=%s score=%.3f headlines=%s",
+        created_at,
+        payload.regime_hint,
+        payload.combined_score,
+        len(payload.headlines),
+    )
 
     return {
         "ok": True,

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { botApi, dataApi, marketApi } from '../api'
+import { botApi, dataApi, marketApi, newsSyncApi } from '../api'
 import {
   Play, Square, Zap, TrendingUp, TrendingDown,
   Minus, AlertTriangle, RefreshCw, Clock, Activity,
@@ -16,6 +16,7 @@ export default function Dashboard({ username }) {
   const [selStrategy, setSelStrategy] = useState('AUTO')
   const [showStratMenu, setShowStratMenu] = useState(false)
   const [sentiment,  setSentiment]  = useState(null)
+  const [newsSync,   setNewsSync]   = useState(null)
   const stratMenuRef = useRef(null)
   const wsRef = useRef(null)
 
@@ -36,6 +37,7 @@ export default function Dashboard({ username }) {
     // V3.0: 拉取市场情绪数据
     const fetchSentiment = () => {
       marketApi.sentiment().then(r => setSentiment(r.data)).catch(() => {})
+      newsSyncApi.status().then(r => setNewsSync(r.data)).catch(() => {})
     }
     fetchSentiment()
     const sentimentTimer = setInterval(fetchSentiment, 60000)  // 每分钟更新
@@ -536,6 +538,38 @@ export default function Dashboard({ username }) {
               ) : (
                 <div style={{ fontSize:15, fontWeight:700, color:'var(--muted2)' }}>—</div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 新闻同步状态卡片 ── */}
+      {newsSync?.latest && (
+        <div className="card mb-16">
+          <div className="card-header">新闻同步状态</div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)' }}>
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>启用状态</div>
+              <div style={{ fontSize:15, fontWeight:700, color: newsSync.enabled_by_weight ? 'var(--green)' : 'var(--muted2)' }}>
+                {newsSync.enabled_by_weight ? '已启用' : '已关闭'}
+              </div>
+            </div>
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>新闻权重</div>
+              <div style={{ fontSize:15, fontWeight:700 }}>{newsSync.news_weight ?? '—'}</div>
+            </div>
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>最近同步</div>
+              <div style={{ fontSize:15, fontWeight:700 }}>{newsSync.age_minutes != null ? `${newsSync.age_minutes} 分钟前` : '—'}</div>
+            </div>
+            <div style={{ padding:'12px 16px' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>最新判断</div>
+              <div style={{ fontSize:15, fontWeight:700,
+                color: newsSync.latest.regime_hint === 'bull' ? 'var(--green)'
+                  : newsSync.latest.regime_hint === 'bear' ? 'var(--red)'
+                  : 'var(--text)' }}>
+                {newsSync.latest.regime_hint} ({newsSync.latest.combined_score > 0 ? '+' : ''}{Number(newsSync.latest.combined_score || 0).toFixed(2)})
+              </div>
             </div>
           </div>
         </div>

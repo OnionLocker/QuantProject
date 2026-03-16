@@ -86,4 +86,8 @@ export const marketApi = {
   strategyPerformance:()     => api.get('/api/market/strategy-performance'),
 }
 
+export const newsSyncApi = {
+  status: () => api.get('/api/news-sync/status'),
+}
+
 export default api
