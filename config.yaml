@@ -33,7 +33,7 @@ selector:
 
   # 权重配置
   tech_weight:      1.0        # 技术面权重（AI情绪分析未接入时建议设为1.0）
-  news_weight:      0.0        # 新闻面权重（AI客户端未配置时设为0，避免空壳影响）
+  news_weight:      0.08       # OpenClaw 新闻面辅助权重（BTC 1h 建议低权重启用）
   news_max_age_min: 120        # 新闻数据超过此分钟数则忽略
 
   # 防抖：连续 N 轮确认才切换策略（避免频繁抖动）
