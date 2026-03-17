@@ -28,6 +28,15 @@ import yaml
 
 logger = logging.getLogger("news_fetcher")
 
+# ── 常量定义 ──────────────────────────────────────────────────────────────────
+_NORMALIZE_MAX_ABS: float = 5.0    # 情绪分数归一化除数上限
+_CRYPTO_WEIGHT:     float = 0.6    # 加密新闻权重占比
+_MACRO_WEIGHT:      float = 0.4    # 宏观新闻权重占比
+_HEADLINE_MAX_LEN:  int   = 300    # 单条标题截断长度
+_DESC_MAX_LEN:      int   = 150    # 描述摘要截断长度
+_SAMPLED_HEADLINE_LIMIT: int = 12  # 采样标题返回上限
+_SUMMARY_KEEP_LIMIT: int  = 200    # news_summary 表最多保留条数
+
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 _DIR         = os.path.dirname(os.path.abspath(__file__))
 _SOURCES_CFG = os.path.join(_DIR, "news_sources.yaml")
@@ -181,7 +190,7 @@ def _fetch_json_api(url: str, json_path: str, title_field: str,
             t = str(item.get(title_field, "")).strip()
             s = str(item.get(summary_field, "")).strip() if summary_field else ""
             if t:
-                titles.append((t + (f" | {s[:150]}" if s else ""))[:300])
+                titles.append((t + (f" | {s[:_DESC_MAX_LEN]}" if s else ""))[:_HEADLINE_MAX_LEN])
         return titles
     except Exception as e:
         logger.warning(f"JSON API抓取失败 {url}: {e}")
@@ -241,7 +250,7 @@ def _ai_sentiment_analysis(headlines: list[str], sentiment_cfg: dict = None) -> 
 
 # ── 情绪分数归一化 ────────────────────────────────────────────────────────────
 
-def _normalize(score: float, max_abs: float = 5.0) -> float:
+def _normalize(score: float, max_abs: float = _NORMALIZE_MAX_ABS) -> float:
     """将原始分数压缩到 [-1.0, 1.0]。"""
     return max(-1.0, min(1.0, score / max_abs))
 
@@ -315,8 +324,8 @@ def analyze_news(force: bool = False) -> dict:
                 else:
                     source_scores.append(kw_score)
 
-            if len(sampled_headlines) < 12:
-                sampled_headlines.append({"title": h[:200], "source": name})
+            if len(sampled_headlines) < _SAMPLED_HEADLINE_LIMIT:
+                sampled_headlines.append({"title": h[:_HEADLINE_MAX_LEN], "source": name})
 
         if ai_candidates and mode in ("ai", "hybrid"):
             ai_raw = _ai_sentiment_analysis(ai_candidates, sentiment_cfg)
@@ -342,7 +351,7 @@ def analyze_news(force: bool = False) -> dict:
     macro_score  = weighted_avg(macro_scores)
 
     if crypto_scores and macro_scores:
-        combined = crypto_score * 0.6 + macro_score * 0.4
+        combined = crypto_score * _CRYPTO_WEIGHT + macro_score * _MACRO_WEIGHT
     elif crypto_scores:
         combined = crypto_score
     elif macro_scores:
@@ -386,7 +395,8 @@ def fetch_and_analyze(force: bool = False) -> dict:
             (datetime.now().isoformat(), result['crypto_score'], result['macro_score'], result['combined_score'], result['regime_hint'], result['summary_text'])
         )
         conn.execute(
-            "DELETE FROM news_summary WHERE id NOT IN (SELECT id FROM news_summary ORDER BY id DESC LIMIT 200)"
+            "DELETE FROM news_summary WHERE id NOT IN (SELECT id FROM news_summary ORDER BY id DESC LIMIT ?)",
+            (_SUMMARY_KEEP_LIMIT,)
         )
         conn.commit()
     finally:

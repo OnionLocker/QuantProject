@@ -229,29 +229,35 @@ class MarketRegimeSelector:
 
         score    = 0.0   # 正 → 牛，负 → 熊，接近0 → 震荡
 
-        # ADX 趋势强度
+        # ADX 趋势强度 (V5.0: BTC适配 - ADX贡献增大，低ADX惩罚减轻)
         if adx_val > self.adx_bull_thresh:
-            adx_strength = min((adx_val - self.adx_bull_thresh) / 20, 1.0)
+            adx_strength = min((adx_val - self.adx_bull_thresh) / 15, 1.0)  # 更快饱和
             # +DI 和 -DI 决定方向
             if pdi_val > mdi_val:
-                score += adx_strength * 2.0
+                score += adx_strength * 2.5   # 趋势方向贡献增大
             else:
-                score -= adx_strength * 2.0
+                score -= adx_strength * 2.5
         else:
-            # ADX 低 → 偏向震荡
-            range_strength = min((self.adx_bull_thresh - adx_val) / 15, 1.0)
-            score *= (1 - range_strength * 0.5)
+            # ADX 低 → 轻微偏向震荡（减轻惩罚，BTC ADX 普遍偏低）
+            range_strength = min((self.adx_bull_thresh - adx_val) / 20, 1.0)
+            score *= (1 - range_strength * 0.3)  # 从0.5降到0.3，减少对方向信号的压制
 
-        # EMA 排列
+        # EMA 排列 (V5.0: BTC适配 - 增加不完美排列的部分得分)
         if es_val > em_val > el_val and close_j > el_val:
             # 多头排列：强烈看涨
             score += 1.5
         elif es_val < em_val < el_val and close_j < el_val:
             # 空头排列：强烈看跌
             score -= 1.5
-        elif abs(es_val - em_val) / em_val < 0.01:
-            # EMA 几乎重合：震荡
-            score *= 0.5
+        elif es_val > em_val and close_j > em_val:
+            # 不完美多头（快>中 + 价格在中线上）：部分看涨
+            score += 0.8
+        elif es_val < em_val and close_j < em_val:
+            # 不完美空头（快<中 + 价格在中线下）：部分看跌
+            score -= 0.8
+        elif abs(es_val - em_val) / em_val < 0.005:
+            # EMA 几乎重合（收紧判定到0.5%）：震荡
+            score *= 0.6
 
         # 价格与长期EMA的关系
         if close_j > el_val * 1.02:
@@ -292,9 +298,9 @@ class MarketRegimeSelector:
             except Exception:
                 pass
 
-        # 布林带挤压 → 震荡信号
+        # 布林带挤压 → 震荡信号 (V5.0: 衰减从0.3提高到0.6，减少误杀)
         if bw_val < self.bb_squeeze_pct:
-            score *= 0.3   # 挤压期信号衰减
+            score *= 0.6   # 挤压期信号衰减（原0.3太激进，BTC挤压后常直接突破）
 
         # 决策
         confidence = min(abs(score) / 4.0, 1.0)
@@ -315,18 +321,19 @@ class MarketRegimeSelector:
                 else:
                     return REGIME_WAIT, 0.3
 
-        # V1.5: WAIT 观望状态 ─────────────────────────────────────────────
-        # ADX 在模糊区间(18-22)且 EMA 几乎平行 = 不确定，不交易
+        # V1.5: WAIT 观望状态 (V5.0: BTC适配 - 大幅收紧WAIT判定) ─────────
+        # 只有 ADX 在极窄模糊区间 且 score 几乎为零才观望
         if (self.adx_range_thresh < adx_val <= self.adx_bull_thresh
-                and abs(score) < 1.0):
+                and abs(score) < 0.5):
             return REGIME_WAIT, 0.2
 
         # ADX 极强（>40）且价格在长期均线上方 → 强势突破 regime
         if adx_val > 40 and score >= 1.5:
             return REGIME_BREAKOUT, min(confidence * 1.2, 1.0)
-        if score >= 1.5:
+        # V5.0: BULL/BEAR 判定门槛从 1.5 降到 1.0，让更多行情分类为有方向
+        if score >= 1.0:
             return REGIME_BULL, confidence
-        elif score <= -1.5:
+        elif score <= -1.0:
             return REGIME_BEAR, confidence
         else:
             return REGIME_RANGING, confidence
@@ -397,65 +404,67 @@ class MarketRegimeSelector:
                               final_regime: str) -> float:
         """
         综合评分系统 [0, 100]，衡量信号的可靠程度。
-        机构级策略通常只在 quality >= 60 时满仓，40~60 半仓，<40 观望。
+        V5.0 BTC适配：重新校准，确保纯技术面模式下也能产生足够分数。
 
-        评分维度：
-          1. 技术面置信度 (30分)
-          2. 多源一致性  (25分) ← 技术/链上/新闻/MTF 方向一致
-          3. 链上数据质量 (20分)
-          4. MTF方向确认  (15分)
-          5. 波动率环境   (10分)
+        评分维度（V5.0 重新分配）：
+          1. 技术面置信度 (45分) ← 提升，作为主力
+          2. 多源一致性  (20分) ← 降低，避免单源惩罚
+          3. 链上数据质量 (10分) ← 降低，可选加分
+          4. MTF方向确认  (10分) ← 降低，辅助
+          5. 波动率环境   (15分) ← 提升基础分
         """
         q = {}
         total = 0.0
 
-        # 1. 技术面置信度 (0-30分)
-        tech_score = tech_conf * 30
+        # 1. 技术面置信度 (0-45分) ← V5.0: 从30提升到45
+        tech_score = tech_conf * 45
         q["tech"] = round(tech_score, 1)
         total += tech_score
 
-        # 2. 多源一致性 (0-25分)
+        # 2. 多源一致性 (0-20分) ← V5.0: 从25降到20，单源基础分提高
         sources = [tech_regime, extra_regime, news_regime, mtf_regime]
         valid_sources = [s for s in sources if s != REGIME_UNKNOWN]
         if valid_sources:
             agree_count = sum(1 for s in valid_sources if s == final_regime)
             agreement_ratio = agree_count / len(valid_sources)
-            consistency_score = agreement_ratio * 25
+            consistency_score = agreement_ratio * 20
             # 三源以上全一致额外加成
             if agree_count >= 3:
-                consistency_score = min(25, consistency_score * 1.2)
+                consistency_score = min(20, consistency_score * 1.2)
         else:
-            consistency_score = 5.0  # 只有技术面，给基础分
+            consistency_score = 10.0  # V5.0: 单源基础分从5提高到10
+
+        # V5.0: 只有1个有效源（纯技术面）时，给更高基础分
+        if len(valid_sources) == 1:
+            consistency_score = max(consistency_score, 12.0)
 
         q["consistency"] = round(consistency_score, 1)
         total += consistency_score
 
-        # 3. 链上数据质量 (0-20分)
+        # 3. 链上数据质量 (0-10分) ← V5.0: 从20降到10
         if extra_regime != REGIME_UNKNOWN:
-            extra_score = extra_conf * 20
-            # 链上方向与最终一致时加分
+            extra_score = extra_conf * 10
             if extra_regime == final_regime:
-                extra_score = min(20, extra_score * 1.1)
+                extra_score = min(10, extra_score * 1.1)
         else:
             extra_score = 0.0
         q["extra"] = round(extra_score, 1)
         total += extra_score
 
-        # 4. MTF方向确认 (0-15分)
+        # 4. MTF方向确认 (0-10分) ← V5.0: 从15降到10，冲突扣分减少
         if mtf_regime != REGIME_UNKNOWN:
             if mtf_regime == final_regime:
-                mtf_score = mtf_conf * 15
+                mtf_score = mtf_conf * 10
             else:
-                # MTF 方向冲突，反而扣分
-                mtf_score = -5.0
+                # MTF 方向冲突，轻微扣分（从-5改为-2）
+                mtf_score = -2.0
         else:
             mtf_score = 0.0
         q["mtf"] = round(mtf_score, 1)
         total += mtf_score
 
-        # 5. 波动率环境 (0-10分)
-        # 已在 tech_conf 中隐含（BB 挤压时 conf 低），这里给基础分
-        vol_score = 5.0 + (tech_conf * 5.0)
+        # 5. 波动率环境 (0-15分) ← V5.0: 提升基础分
+        vol_score = 8.0 + (tech_conf * 7.0)  # 基础8分 + 技术面加成
         q["volatility"] = round(vol_score, 1)
         total += vol_score
 

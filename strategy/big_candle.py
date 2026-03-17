@@ -278,9 +278,12 @@ class BigCandleStrategy(BaseStrategy):
             body, body_pct, body_ratio, has_vol = self._candle_stats(
                 O[j], H[j], L[j], C[j], V[j], VMA[j] * self.vol_mult)
 
-            # ── 大阳线做多 ────────────────────────────────────────────────────
+            # V5.0: 成交量比率
+            vol_ratio = V[j] / VMA[j] if VMA[j] > 0 else 1.0
+
+            # ── 大阳线做多 (V5.0: 场景放宽) ────────────────────────────────
             if body_pct >= self.body_pct and body_ratio >= self.body_ratio_min and has_vol:
-                # 高位过滤：近 hlb 根内低点
+                # 高位过滤
                 look_start = max(0, j - hlb)
                 past_low   = np.min(L[look_start:j])
                 already_up = (C[j] - past_low) / past_low if past_low > 0 else 0
@@ -289,41 +292,34 @@ class BigCandleStrategy(BaseStrategy):
                     continue
 
                 sl = self._sl_long(O[j], L[j], ATR[j])
-                risk = max(C[j] - sl, ATR[j] * 0.5)  # 保底 risk 避免 tp=entry
+                risk = max(C[j] - sl, ATR[j] * 0.5)
 
                 scene = ''
-
-                # M1: 低位反转 —— RSI超卖 + 大阳站上趋势线
-                if RSI[j] < self.rsi_os and C[j] > ET[j]:
+                if RSI[j] < self.rsi_os + 5 and C[j] > ET[j]:
                     scene = 'M1: 低位反转大阳'
-
-                # M2: 趋势加速突破近期高点
                 elif (C[j] > ET[j] and j >= lb and
                       C[j] > np.max(H[j - lb:j])):
                     scene = 'M2: 趋势加速突破高点'
-
-                # M3: 平台整理后突破（布林带收窄）
                 elif (j >= lb and not np.isnan(BBW[j - lb]) and
                       np.min(BBW[max(0, j - lb):j]) < self.bb_squeeze_pct and
                       C[j] > np.max(H[max(0, j - lb):j])):
                     scene = 'M3: 平台突破大阳'
-
-                # 通用大阳线（满足量价但不满足具体场景时降级触发）
-                elif body_ratio >= 0.75:
-                    scene = 'GEN: 强大阳线（光头光脚）'
+                elif body_ratio >= 0.60:
+                    scene = 'GEN: 强大阳线'
+                elif vol_ratio > 1.5 and C[j] > O[j]:
+                    scene = 'VOL: 量价齐升大阳'
 
                 if scene:
                     actions[i] = 'BUY'
                     sig_sl[i]  = sl
                     sig_tp1[i] = C[j] + risk * self.rr1
                     sig_tp2[i] = C[j] + risk * self.rr1 * 2
-                    reasons[i] = f'🟢 {scene} | 实体{body_pct*100:.1f}% 量{V[j]/VMA[j]*self.vol_mult:.1f}x'
+                    reasons[i] = f'🟢 {scene} | 实体{body_pct*100:.1f}% 量{vol_ratio:.1f}x'
                     last_sig_i = i
                     continue
 
-            # ── 大阴线做空 ────────────────────────────────────────────────────
+            # ── 大阴线做空 (V5.0: 场景放宽) ────────────────────────────────
             if self.enable_short and body_pct <= -self.body_pct and body_ratio >= self.body_ratio_min and has_vol:
-                # 低位过滤：已跌很多就不追空
                 look_start = max(0, j - hlb)
                 past_high  = np.max(H[look_start:j])
                 already_dn = (past_high - C[j]) / past_high if past_high > 0 else 0
@@ -335,31 +331,26 @@ class BigCandleStrategy(BaseStrategy):
                 risk = max(sl - C[j], ATR[j] * 0.5)
 
                 scene = ''
-
-                # 镜像 M1: 高位反转大阴
-                if RSI[j] > (100 - self.rsi_os) and C[j] < ET[j]:
+                if RSI[j] > (100 - self.rsi_os - 5) and C[j] < ET[j]:
                     scene = 'M1↓: 高位反转大阴'
-
-                # 镜像 M2: 趋势加速跌破近期低点
                 elif (C[j] < ET[j] and j >= lb and
                       C[j] < np.min(L[j - lb:j])):
                     scene = 'M2↓: 趋势加速跌破低点'
-
-                # 镜像 M3: 平台向下突破
                 elif (j >= lb and not np.isnan(BBW[j - lb]) and
                       np.min(BBW[max(0, j - lb):j]) < self.bb_squeeze_pct and
                       C[j] < np.min(L[max(0, j - lb):j])):
                     scene = 'M3↓: 平台向下突破大阴'
-
-                elif body_ratio >= 0.75:
-                    scene = 'GEN↓: 强大阴线（光头光脚）'
+                elif body_ratio >= 0.60:
+                    scene = 'GEN↓: 强大阴线'
+                elif vol_ratio > 1.5 and C[j] < O[j]:
+                    scene = 'VOL↓: 量价齐跌大阴'
 
                 if scene:
                     actions[i] = 'SELL'
                     sig_sl[i]  = sl
                     sig_tp1[i] = C[j] - risk * self.rr1
                     sig_tp2[i] = C[j] - risk * self.rr1 * 2
-                    reasons[i] = f'🔴 {scene} | 实体{abs(body_pct)*100:.1f}% 量{V[j]/VMA[j]*self.vol_mult:.1f}x'
+                    reasons[i] = f'🔴 {scene} | 实体{abs(body_pct)*100:.1f}% 量{vol_ratio:.1f}x'
                     last_sig_i = i
 
         df['sig_action'] = actions
@@ -409,7 +400,10 @@ class BigCandleStrategy(BaseStrategy):
         lb  = self.breakout_lookback
         hlb = self.high_pos_lookback
 
-        # ── 做多 ──────────────────────────────────────────────────────────────
+        # V5.0: 计算成交量比率（用于场景降级判断）
+        vol_ratio = V[j] / VMA[j] if VMA[j] > 0 else 1.0
+
+        # ── 做多 (V5.0: 放宽场景条件，增加兜底触发) ──────────────────────
         if body_pct >= self.body_pct and body_ratio >= self.body_ratio_min and has_vol:
             look_start = max(0, j - hlb)
             past_low   = np.min(L[look_start:j])
@@ -418,16 +412,23 @@ class BigCandleStrategy(BaseStrategy):
                 sl   = self._sl_long(O[j], L[j], ATR[j])
                 risk = max(entry - sl, ATR[j] * 0.5)
                 scene = ''
-                if RSI[j] < self.rsi_os and C[j] > ET[j]:
+                # M1: 低位反转 (V5.0: RSI放宽到45)
+                if RSI[j] < self.rsi_os + 5 and C[j] > ET[j]:
                     scene = 'M1: 低位反转大阳'
+                # M2: 趋势加速
                 elif C[j] > ET[j] and j >= lb and C[j] > np.max(H[j - lb:j]):
                     scene = 'M2: 趋势加速突破高点'
+                # M3: 平台突破
                 elif (j >= lb and not np.isnan(BBW[j - lb]) and
                       np.min(BBW[max(0, j - lb):j]) < self.bb_squeeze_pct and
                       C[j] > np.max(H[max(0, j - lb):j])):
                     scene = 'M3: 平台突破大阳'
-                elif body_ratio >= 0.75:
+                # V5.0: 通用大阳线门槛降低 (0.75→0.60)
+                elif body_ratio >= 0.60:
                     scene = 'GEN: 强大阳线'
+                # V5.0 新增: 量价齐升兜底（成交量>1.5x均量 + 阳线）
+                elif vol_ratio > 1.5 and C[j] > O[j]:
+                    scene = 'VOL: 量价齐升大阳'
                 if scene:
                     sig.update({
                         "action": "BUY", "entry": entry, "sl": sl,
@@ -437,7 +438,7 @@ class BigCandleStrategy(BaseStrategy):
                     })
                     return sig
 
-        # ── 做空 ──────────────────────────────────────────────────────────────
+        # ── 做空 (V5.0: 镜像放宽) ──────────────────────────────────────────
         if self.enable_short and body_pct <= -self.body_pct and body_ratio >= self.body_ratio_min and has_vol:
             look_start = max(0, j - hlb)
             past_high  = np.max(H[look_start:j])
@@ -446,7 +447,7 @@ class BigCandleStrategy(BaseStrategy):
                 sl   = self._sl_short(O[j], H[j], ATR[j])
                 risk = max(sl - entry, ATR[j] * 0.5)
                 scene = ''
-                if RSI[j] > (100 - self.rsi_os) and C[j] < ET[j]:
+                if RSI[j] > (100 - self.rsi_os - 5) and C[j] < ET[j]:
                     scene = 'M1↓: 高位反转大阴'
                 elif C[j] < ET[j] and j >= lb and C[j] < np.min(L[j - lb:j]):
                     scene = 'M2↓: 趋势加速跌破低点'
@@ -454,8 +455,10 @@ class BigCandleStrategy(BaseStrategy):
                       np.min(BBW[max(0, j - lb):j]) < self.bb_squeeze_pct and
                       C[j] < np.min(L[max(0, j - lb):j])):
                     scene = 'M3↓: 平台向下突破大阴'
-                elif body_ratio >= 0.75:
+                elif body_ratio >= 0.60:
                     scene = 'GEN↓: 强大阴线'
+                elif vol_ratio > 1.5 and C[j] < O[j]:
+                    scene = 'VOL↓: 量价齐跌大阴'
                 if scene:
                     sig.update({
                         "action": "SELL", "entry": entry, "sl": sl,

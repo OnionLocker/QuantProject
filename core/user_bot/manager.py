@@ -143,6 +143,11 @@ def get_user_selector(user_id: int):
 
 # ── Watchdog：Bot 意外崩溃后自动重启（带指数退避）────────────────────────────
 
+_WATCHDOG_CHECK_INTERVAL_SEC: int = 60    # Watchdog 检测间隔
+_WATCHDOG_BASE_BACKOFF_SEC:   int = 30    # 退避基数（秒）
+_WATCHDOG_MAX_BACKOFF_SEC:    int = 300   # 退避上限（秒）
+
+
 def _get_notifier_for_user(user_id: int, username: str):
     """尽力加载用户的 Telegram notifier，失败则回退到全局。"""
     try:
@@ -193,7 +198,10 @@ def _watchdog_loop(check_interval: int = 60):
             crash_count = bot_state._crash_count
 
             # 退避延迟：1次=30s，2次=60s，3次=120s，4次及以上=300s
-            backoff_sec = min(300, 30 * (2 ** (crash_count - 1)))
+            backoff_sec = min(
+                _WATCHDOG_MAX_BACKOFF_SEC,
+                _WATCHDOG_BASE_BACKOFF_SEC * (2 ** (crash_count - 1)),
+            )
             now = time.time()
             if now - bot_state._last_restart_at < backoff_sec:
                 bot_logger.info(
@@ -237,7 +245,8 @@ def _watchdog_loop(check_interval: int = 60):
 
 def _start_watchdog():
     t = threading.Thread(
-        target=_watchdog_loop, kwargs={"check_interval": 60},
+        target=_watchdog_loop,
+        kwargs={"check_interval": _WATCHDOG_CHECK_INTERVAL_SEC},
         daemon=True, name="BotWatchdog"
     )
     t.start()

@@ -9,373 +9,66 @@ core/user_bot/runner.py - 每用户 Bot 主循环（多用户版）
   5. 告警去重：同类错误 5 分钟内只推一次 Telegram
   6. 订单对账：Bot 启动时核对交易所侧条件单是否存在
   7. 连续查询失败计数：网络持续抖动时主动告警
+
+V4.2 重构：
+  - 交易所操作已移至 exchange_ops.py
+  - 上下文/配置/通知/状态已移至 bot_context.py
+  - 主循环拆分为子函数，降低单函数圈复杂度
 """
 import time
 import math
-import json
+import traceback
 from datetime import datetime
 
-from utils.logger import bot_logger, get_user_logger
-from utils.notifier import make_notifier, send_telegram_msg
+import ccxt
+import pandas as pd
+import numpy as np
+
+from utils.logger import bot_logger
 from utils.config_loader import get_config
 from strategy.registry import get_strategy
-from execution.db_handler import (get_conn, record_balance, record_trade,
-                                   save_risk_state, load_risk_state,
-                                   load_tg_config, load_user_config)
-from api.auth.crypto import decrypt
+from execution.db_handler import (
+    record_balance, record_trade,
+)
 from api.routes.keys import get_user_exchange
 from risk.risk_manager import RiskManager
 
-
-# ── 每用户 Telegram 通知 ────────────────────────────────────────────────────────
-
-def _load_user_notifier(user_id: int, logger=None):
-    """
-    加载用户的 Telegram 通知函数。
-    返回 (notifier_func, error_msg)：
-      - 成功：(func, None)
-      - 未配置：(None, "not_configured")
-      - 解密失败：(None, "decrypt_error: ...")
-    """
-    try:
-        raw = load_tg_config(user_id)
-        if not raw["tg_bot_token_enc"] or not raw["tg_chat_id_enc"]:
-            return None, "not_configured"
-        token   = decrypt(raw["tg_bot_token_enc"])
-        chat_id = decrypt(raw["tg_chat_id_enc"])
-        if not token or not chat_id:
-            return None, "decrypted_empty"
-        notifier = make_notifier(token, chat_id)
-        return notifier, None
-    except Exception as e:
-        err = f"decrypt_error: {e}"
-        if logger:
-            logger.error(f"[user_id={user_id}] Telegram 配置加载失败: {err}")
-        return None, err
+# ── 拆分后的子模块 ────────────────────────────────────────────────────────────
+from core.user_bot.bot_context import (
+    should_alert, empty_state, load_state, save_state, clear_state,
+    persist_risk_state, restore_risk_state, resolve_config,
+    load_notifier, record_strategy_performance, get_strategy_win_rate,
+)
+from core.user_bot.exchange_ops import (
+    get_swap_usdt, detect_pos_mode, fetch_ohlcv_safe,
+    place_algo, cancel_all_algo, live_position_amount,
+)
 
 
-# ── 告警去重（同类错误 5 分钟内只推一次）────────────────────────────────────────
-
-_last_alert_time: dict = {}   # key -> timestamp
-
-def _should_alert(key: str, cooldown_sec: int = 300) -> bool:
-    now = time.time()
-    last = _last_alert_time.get(key, 0)
-    if now - last >= cooldown_sec:
-        _last_alert_time[key] = now
-        return True
-    return False
-
-
-# ── 风控状态持久化辅助 ──────────────────────────────────────────────────────────
-
-def _save_risk_state(user_id: int, rm: RiskManager):
-    save_risk_state(
-        user_id,
-        consecutive_losses=rm._consecutive_losses,
-        daily_start_balance=rm._daily_start_balance,
-        daily_loss_triggered=rm._daily_loss_triggered,
-        last_date=datetime.now().strftime('%Y-%m-%d'),
-    )
-
-
-def _restore_risk_state(user_id: int, rm: RiskManager):
-    data = load_risk_state(user_id)
-    rm._consecutive_losses   = data["consecutive_losses"]
-    rm._daily_start_balance  = data["daily_start_balance"]
-    rm._daily_loss_triggered = data["daily_loss_triggered"]
-    today = datetime.now().strftime('%Y-%m-%d')
-    if data.get("last_date") != today:
-        rm._daily_start_balance  = None
-        rm._daily_loss_triggered = False
-    # ── Bug fix: 恢复熔断状态 ────────────────────────────────────────────────
-    # 服务重启后仅恢复计数是不够的：若连亏次数已达上限，必须同步恢复熔断开关，
-    # 否则 is_trading_allowed 默认 True，导致重启后熔断失效。
-    if (rm._consecutive_losses >= rm.max_consecutive_losses
-            or rm._daily_loss_triggered):
-        rm.is_trading_allowed = False
-
-
-# ── 持仓状态（per-user，读写 SQLite bot_state 表）────────────────────────────
-
-def _empty_state() -> dict:
-    return {
-        "position_side": None, "position_amount": 0,
-        "entry_price": 0.0, "active_sl": 0.0,
-        "active_tp1": 0.0, "active_tp2": 0.0,
-        "open_fee": 0.0, "margin_used": 0.0,
-        "strategy_name": "", "signal_reason": "",
-        "entry_time": "",
-        "has_moved_to_breakeven": False,
-        "has_taken_partial_profit": False,
-        "exchange_order_ids": {"sl_order": None, "tp_order": None},
-        # V2.5: Trailing Stop 状态
-        "trailing_stop_active": False,
-        "trailing_stop_best_price": 0.0,
-        # V2.5: 时间止损
-        "entry_bar_count": 0,
-    }
-
-
-def _load_state(user_id: int) -> dict:
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT value FROM bot_state WHERE user_id=?", (user_id,)
-    ).fetchone()
-    if row:
-        s = json.loads(row[0])
-        empty = _empty_state()
-        for k, v in empty.items():
-            if k not in s:
-                s[k] = v
-        return s
-    return _empty_state()
-
-
-def _save_state(user_id: int, state: dict):
-    conn = get_conn()
-    conn.execute(
-        "INSERT OR REPLACE INTO bot_state (user_id, value) VALUES (?, ?)",
-        (user_id, json.dumps(state, ensure_ascii=False))
-    )
-    conn.commit()
-
-
-def _clear_state(user_id: int):
-    _save_state(user_id, _empty_state())
-
-
-# ── 每用户有效配置（DB 优先，fallback 到 config.yaml）────────────────────────
-
-def _resolve_config(user_id: int) -> dict:
-    """
-    读取用户在 DB 里的个性化配置，未设置的字段 fallback 到全局 config.yaml。
-    返回完整的运行参数 dict。
-    """
-    global_cfg = get_config()
-    bc = global_cfg.get("bot", {})
-    rc = global_cfg.get("risk", {})
-    sc = global_cfg.get("strategy", {})
-
-    user_cfg = load_user_config(user_id)
-
-    # Fix: 使用 is not None 替代 or，避免用户配置 0 值时被 fallback 覆盖
-    def _pick(user_val, fallback_val):
-        """用户配置优先（允许 0/空字符串等 falsy 值），仅当 None 时 fallback。"""
-        return user_val if user_val is not None else fallback_val
-
-    max_consecutive_losses = _pick(
-        user_cfg.get("max_consecutive_losses"),
-        rc.get("max_consecutive_losses", 3),
-    )
-    daily_loss_limit_pct = _pick(
-        user_cfg.get("daily_loss_limit_pct"),
-        rc.get("daily_loss_limit_pct", 0.05),
-    )
-    max_trade_amount = _pick(
-        user_cfg.get("max_trade_amount"),
-        rc.get("max_trade_amount", 1000),
-    )
-
-    return {
-        "symbol":          _pick(user_cfg.get("symbol"),          bc.get("symbol",           "BTC/USDT:USDT")),
-        "timeframe":       _pick(user_cfg.get("timeframe"),       bc.get("timeframe",         "1h")),
-        "leverage":        _pick(user_cfg.get("leverage"),        bc.get("leverage",           3)),
-        "risk_pct":        _pick(user_cfg.get("risk_pct"),        rc.get("risk_per_trade_pct", 0.01)),
-        "strategy_name":   _pick(user_cfg.get("strategy_name"),   sc.get("name",              "PA_5S")),
-        "strategy_params": _pick(user_cfg.get("strategy_params"), sc.get("params",            {})),
-        "contract_size":   bc.get("contract_size",    0.01),
-        "taker_fee_rate":  bc.get("taker_fee_rate",   0.0005),
-        "check_interval":  bc.get("check_interval",   300),
-        "max_trade_amount":       max_trade_amount,
-        "max_consecutive_losses": max_consecutive_losses,
-        "daily_loss_limit_pct":   daily_loss_limit_pct,
-    }
-
-
-# ── OKX 工具函数（per-user exchange 实例）───────────────────────────────────
-
-def _get_swap_usdt(ex) -> float:
-    """获取可用 USDT。
-    优先走 OKX 原始账户接口，避免模拟盘下 ccxt.fetch_balance() 的异常结构问题。
-    已知 Bug：ccxt 在 OKX 模拟盘下 fetch_balance() 可能抛出
-    TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'
-    """
-    def _f(v):
-        try:
-            return float(v)
-        except Exception:
-            return 0.0
-
-    # 1) 优先走 OKX 原始账户接口
-    try:
-        raw = ex.privateGetAccountBalance()
-        data = (raw or {}).get('data') or []
-        if data:
-            d0 = data[0] or {}
-            # 尝试从 totalEq / adjEq 获取总权益（模拟盘下也可用）
-            total_eq = _f(d0.get('totalEq')) or _f(d0.get('adjEq'))
-            if total_eq > 0:
-                # 优先取 USDT 可用余额
-                details = d0.get('details') or []
-                for item in details:
-                    if (item or {}).get('ccy') == 'USDT':
-                        v = _f((item or {}).get('availBal'))
-                        if v > 0:
-                            return v
-                        v = _f((item or {}).get('eq')) or _f((item or {}).get('cashBal'))
-                        if v > 0:
-                            return v
-                # 没有单独 USDT 条目时，用总权益近似
-                return total_eq
-    except Exception:
-        pass
-
-    # 2) 回退到 ccxt balance（已知模拟盘可能触发 TypeError）
-    for acc_type in ("swap", "trading", "future"):
-        try:
-            bal = ex.fetch_balance(params={"type": acc_type})
-            v = float(bal.get("USDT", {}).get("free", 0))
-            if v > 0:
-                return v
-        except Exception:
-            continue
-    try:
-        bal = ex.fetch_balance()
-        return float(bal.get("USDT", {}).get("free", 0))
-    except Exception:
-        pass
-
-    # 3) 最后手段：fetch_accounts 看有没有余额信息
-    try:
-        accounts = ex.fetch_accounts()
-        for acc in (accounts or []):
-            if acc.get("currency") == "USDT":
-                v = _f(acc.get("free") or acc.get("total"))
-                if v > 0:
-                    return v
-    except Exception:
-        pass
-
-    return 0.0
-
-
-def _detect_pos_mode(ex) -> str:
-    try:
-        # 优先走 OKX 原始接口（ccxt snake_case/camelCase 兼容不一致时更稳）
-        if hasattr(ex, 'privateGetAccountConfig'):
-            cfg = ex.privateGetAccountConfig()
-        else:
-            cfg = ex.private_get_account_config()
-        data = (cfg or {}).get("data") or []
-        mode = (data[0] or {}).get("posMode", "")
-        return "hedge" if mode == "long_short_mode" else "net"
-    except Exception:
-        return "net"
-
-
-def _symbol_to_okx_inst_id(symbol: str) -> str:
-    s = (symbol or '').upper()
-    if ':' in s:
-        s = s.split(':', 1)[0]
-    s = s.replace('/', '-')
-    if not s.endswith('-SWAP'):
-        s = s + '-SWAP'
-    return s
-
-
-def _timeframe_to_okx_bar(tf: str) -> str:
-    mp = {
-        '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
-        '1h': '1H', '2h': '2H', '4h': '4H', '6h': '6H', '12h': '12H',
-        '1d': '1D', '1w': '1W'
-    }
-    return mp.get((tf or '1h').lower(), '1H')
-
-
-def _fetch_ohlcv_safe(ex, symbol: str, timeframe: str, limit: int = 200):
-    """优先 ccxt.fetch_ohlcv；若 demo 环境异常，则回退 OKX 原始 K 线接口。"""
-    try:
-        return ex.fetch_ohlcv(symbol, timeframe, limit=limit)
-    except Exception:
-        try:
-            inst_id = _symbol_to_okx_inst_id(symbol)
-            bar = _timeframe_to_okx_bar(timeframe)
-            resp = ex.publicGetMarketCandles({'instId': inst_id, 'bar': bar, 'limit': str(limit)})
-            data = (resp or {}).get('data') or []
-            # OKX: [ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]
-            rows = []
-            for r in reversed(data):
-                rows.append([
-                    int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])
-                ])
-            return rows
-        except Exception:
-            raise
-
-
-def _place_algo(ex, symbol: str, side: str, amount: float,
-                trigger_price: float, pos_side: str,
-                algo_type: str, margin_mode: str = "cross") -> dict | None:
-    pos_mode = _detect_pos_mode(ex)
-    params = {"reduceOnly": True, "tdMode": margin_mode}
-
-    if algo_type == "sl":
-        params["stopLossPrice"]    = trigger_price
-        params["slOrdPx"]         = -1
-        params["slTriggerPxType"] = "last"
-    else:
-        params["takeProfitPrice"]  = trigger_price
-        params["tpOrdPx"]         = -1
-        params["tpTriggerPxType"] = "last"
-
-    if pos_mode == "hedge":
-        params["posSide"] = pos_side
-
-    type_str = "SL" if algo_type == "sl" else "TP"
-    try:
-        order = ex.create_order(
-            symbol=symbol, type="market", side=side,
-            amount=amount, price=None, params=params
-        )
-        return order
-    except Exception as e:
-        return None
-
-
-def _cancel_all_algo(ex, symbol: str, logger=None, notify=None, tag: str = ""):
-    """取消所有条件单。失败时记录日志并发出告警，避免旧 SL/TP 残留。"""
-    try:
-        ex.cancel_all_orders(symbol, params={"stop": True})
-    except Exception as e:
-        err_msg = f"{tag} ⚠️ 取消条件单失败: {e}"
-        if logger:
-            logger.error(err_msg)
-        else:
-            bot_logger.error(err_msg)
-        if notify:
-            try:
-                notify(f"⚠️ <b>取消条件单失败</b>\n{str(e)[:200]}\n请人工检查是否有残留条件单！")
-            except Exception:
-                pass
-
-
-def _live_position_amount(ex, symbol: str, logger=None, tag: str = "") -> float:
-    """
-    查询交易所当前持仓合约张数。
-    返回 >=0 表示实际持仓，-1 表示查询失败（不能误判为空仓）。
-    """
-    try:
-        positions = ex.fetch_positions([symbol])
-        return sum(
-            float(p.get("contracts") or 0)
-            for p in positions
-            if p.get("symbol") == symbol and float(p.get("contracts") or 0) > 0
-        )
-    except Exception as e:
-        if logger:
-            logger.warning(f"{tag} 持仓查询异常: {e}")
-        return -1.0
+# ── 常量定义 ──────────────────────────────────────────────────────────────────
+_ALERT_COOLDOWN_DEFAULT_SEC: int = 300   # 告警去重默认冷却期（5分钟）
+_ALERT_COOLDOWN_LONG_SEC:   int = 3600  # 长冷却期（1小时，用于零余额等低频告警）
+_ZERO_BALANCE_ALERT_ROUNDS: int = 5     # 连续零余额 N 轮后发出告警
+_POS_QUERY_FAIL_ALERT_THRESHOLD: int = 5  # 持仓查询连续失败 N 次后告警
+_RATE_LIMIT_MIN_WAIT_SEC:   int = 30    # 限频最短退避秒数
+_RATE_LIMIT_MAX_WAIT_SEC:   int = 120   # 限频最长退避秒数
+_MAINTENANCE_WAIT_SEC:      int = 120   # 交易所维护等待秒数
+_MAINTENANCE_ALERT_COOLDOWN_SEC: int = 1800  # 维护告警冷却期（30分钟）
+_NETWORK_ERROR_WAIT_SEC:    int = 15    # 网络错误短暂等待
+_GENERIC_ERROR_WAIT_SEC:    int = 10    # 通用错误等待
+_KLINE_MIN_LIMIT:           int = 200   # K线拉取最小条数
+_KLINE_WARMUP_MULTIPLIER:   int = 2     # 预热期乘数
+_KLINE_WARMUP_EXTRA:        int = 10    # 预热期额外条数
+_LOW_WIN_RATE_THRESHOLD:  float = 0.35  # 策略降权胜率阈值
+_LOW_WIN_RATE_SCALE:      float = 0.6   # 低胜率策略仓位缩放
+_LOW_SIGNAL_QUALITY_SKIP:   int = 25    # V5.0: 从40降到25，信号质量低于此值不开仓
+_MID_SIGNAL_QUALITY:        int = 45    # V5.0: 从60降到45，中等信号质量阈值
+_MIN_SIGNAL_QUALITY_SCALE: float = 0.5  # V5.0: 从0.4提升到0.5，最低信号质量缩放
+_SL_TIGHTEN_RATIO:        float = 0.5   # Regime切换时SL收紧比例
+_TIME_STOP_FORCE_MULT:    float = 1.5   # 强制时间止损超时倍数
+_ERROR_TRACEBACK_LINES:     int = 4     # 错误推送时包含的调用栈行数
+_ERROR_MSG_MAX_LEN:         int = 200   # 错误消息最大长度
+_SHORT_TB_MAX_LEN:          int = 300   # 短调用栈最大长度
 
 
 # ── 被动平仓成交价获取（优先拉取真实成交，废弃推断）────────────────────────────
@@ -395,7 +88,6 @@ def _fetch_passive_fill_price(ex, symbol: str, state: dict) -> tuple[float, str]
             since_ms = int(dt.timestamp() * 1000)
 
         trades = ex.fetch_my_trades(symbol, since=since_ms, limit=20)
-        # 过滤出减仓成交（reduceOnly 或 info 里有标记）
         close_trades = [
             t for t in trades
             if (
@@ -416,7 +108,7 @@ def _fetch_passive_fill_price(ex, symbol: str, state: dict) -> tuple[float, str]
     try:
         sl_id = state.get("exchange_order_ids", {}).get("sl_order")
         tp_id = state.get("exchange_order_ids", {}).get("tp_order")
-        for order_id in filter(None, [tp_id, sl_id]):   # 先查 TP，再查 SL
+        for order_id in filter(None, [tp_id, sl_id]):
             try:
                 order = ex.fetch_order(order_id, symbol, params={"stop": True})
                 status = (order.get("status") or "").lower()
@@ -436,13 +128,10 @@ def _fetch_passive_fill_price(ex, symbol: str, state: dict) -> tuple[float, str]
     active_sl = state["active_sl"]
     active_tp = state["active_tp1"]
 
-    # 根据当前价格方向判断哪个被触发（比原先的推断更保守）
     if active_sl > 0 and active_tp > 0:
         if is_long:
-            # 多单：TP在上方，SL在下方
             fill = active_tp if active_tp > entry else active_sl
         else:
-            # 空单：TP在下方，SL在上方
             fill = active_tp if active_tp < entry else active_sl
     else:
         fill = active_sl if active_sl > 0 else entry
@@ -455,7 +144,7 @@ def _fetch_passive_fill_price(ex, symbol: str, state: dict) -> tuple[float, str]
 def _reconcile_orders(ex, symbol: str, state: dict, logger, notify, tag: str):
     """
     Bot 启动时调用：若本地记录了持仓但条件单可能已失效，重新核查并补挂。
-    返回修正后的 state（如条件单已失效则补挂并更新 order ids）。
+    返回修正后的 state。
     """
     if state["position_amount"] <= 0:
         return state
@@ -492,8 +181,8 @@ def _reconcile_orders(ex, symbol: str, state: dict, logger, notify, tag: str):
     amount     = state["position_amount"]
 
     if not sl_alive:
-        new_sl = _place_algo(ex, symbol, close_side, amount,
-                             state["active_sl"], pos_side, "sl")
+        new_sl = place_algo(ex, symbol, close_side, amount,
+                            state["active_sl"], pos_side, "sl")
         if new_sl:
             state["exchange_order_ids"]["sl_order"] = new_sl.get("id")
             logger.info(f"{tag} SL 条件单已补挂")
@@ -502,38 +191,13 @@ def _reconcile_orders(ex, symbol: str, state: dict, logger, notify, tag: str):
             notify(f"🚨 <b>{tag} SL 补挂失败</b>，请立即人工检查持仓！")
 
     if not tp_alive and state["active_tp1"] > 0:
-        new_tp = _place_algo(ex, symbol, close_side, amount,
-                             state["active_tp1"], pos_side, "tp")
+        new_tp = place_algo(ex, symbol, close_side, amount,
+                            state["active_tp1"], pos_side, "tp")
         if new_tp:
             state["exchange_order_ids"]["tp_order"] = new_tp.get("id")
             logger.info(f"{tag} TP 条件单已补挂")
 
     return state
-
-
-# ── 网络错误分类 ──────────────────────────────────────────────────────────────
-
-import ccxt
-
-def _classify_error(e: Exception) -> str:
-    """
-    将 ccxt 异常分类，返回处理策略字符串：
-      - 'rate_limit'  : 被限频，需要退避等待
-      - 'maintenance' : 交易所维护中
-      - 'auth_error'  : API Key 无效，需要立即停止
-      - 'network'     : 网络临时故障，正常重试
-      - 'unknown'     : 未知错误
-    """
-    err_str = str(e).lower()
-    if isinstance(e, ccxt.RateLimitExceeded):
-        return 'rate_limit'
-    if isinstance(e, ccxt.AuthenticationError):
-        return 'auth_error'
-    if isinstance(e, ccxt.ExchangeNotAvailable) or 'maintenance' in err_str:
-        return 'maintenance'
-    if isinstance(e, (ccxt.NetworkError, ccxt.RequestTimeout)):
-        return 'network'
-    return 'unknown'
 
 
 # ── V2.5: Trailing Stop 追踪止损 ──────────────────────────────────────────────
@@ -547,13 +211,9 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
     V2.5 追踪止损逻辑：
     1. 盈利达到 ATR * trigger_mult 后激活追踪
     2. 价格回撤 ATR * distance_mult 时更新 SL 到最优价 - distance
-    
+
     修改 state（in-place），不直接平仓，只调整交易所 SL 条件单。
     """
-    import pandas as pd
-    import numpy as np
-
-    # 计算当前 ATR
     try:
         close = df['close']
         high = df['high']
@@ -567,26 +227,21 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
     except Exception:
         return
 
-    # 计算当前盈利（点数）
     if is_long:
         profit_points = current_price - entry
     else:
         profit_points = entry - current_price
 
-    # 激活条件：盈利 > ATR * trigger
     trigger_level = current_atr * trigger_mult
     if profit_points < trigger_level:
-        # 尚未达到激活条件，不追踪
         state["trailing_stop_active"] = False
         return
 
-    # 激活追踪
     if not state.get("trailing_stop_active"):
         state["trailing_stop_active"] = True
         state["trailing_stop_best_price"] = current_price
         logger.info(f"{tag} ✅ Trailing Stop 已激活，盈利={profit_points:.2f} > 触发={trigger_level:.2f}")
 
-    # 更新最优价格
     best = state.get("trailing_stop_best_price", entry)
     if is_long:
         if current_price > best:
@@ -597,14 +252,12 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
             state["trailing_stop_best_price"] = current_price
             best = current_price
 
-    # 计算新的追踪止损价
     trail_distance = current_atr * distance_mult
     if is_long:
         new_sl = best - trail_distance
     else:
         new_sl = best + trail_distance
 
-    # 只上移 SL，不下移（多头 SL 只能往上调，空头 SL 只能往下调）
     old_sl = state.get("active_sl", 0.0)
     should_update = False
     if is_long and new_sl > old_sl:
@@ -614,23 +267,18 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
 
     if should_update:
         try:
-            # 取消旧 SL 条件单，挂新的
-            _cancel_all_algo(ex, symbol, logger=logger)
-
-            sl_ord = _place_algo(
+            cancel_all_algo(ex, symbol, logger=logger)
+            sl_ord = place_algo(
                 ex, symbol, close_side, state["position_amount"],
                 new_sl, pos_side_str, "sl"
             )
-
-            # 如果还有 TP，也重新挂
             tp_price = state.get("active_tp1", 0) or state.get("active_tp2", 0)
             tp_ord = None
             if tp_price > 0:
-                tp_ord = _place_algo(
+                tp_ord = place_algo(
                     ex, symbol, close_side, state["position_amount"],
                     tp_price, pos_side_str, "tp"
                 )
-
             state["active_sl"] = new_sl
             state["exchange_order_ids"] = {
                 "sl_order": sl_ord.get("id") if sl_ord else None,
@@ -644,46 +292,582 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
             logger.warning(f"{tag} Trailing Stop 更新SL失败: {e}")
 
 
-# ── V2.5: 策略绩效追踪 ──────────────────────────────────────────────────────
+# ── 运行时参数容器 ─────────────────────────────────────────────────────────────
 
-def _record_strategy_performance(user_id: int, strategy_name: str, pnl: float):
+class _RunParams:
+    """将主循环中大量传递的参数收集到一个对象，减少函数签名长度。"""
+    __slots__ = (
+        'user_id', 'username', 'rm', 'stop_ev', 'logger', 'notify', 'tag',
+        'ex', 'cfg', 'symbol', 'timeframe', 'leverage', 'contract_size',
+        'fee_rate', 'interval', 'risk_pct', 'cached_pos_mode',
+        'use_auto', 'selector', 'strategy',
+        'trailing_stop_enable', 'trailing_stop_trigger', 'trailing_stop_distance',
+        'time_stop_bars', 'time_stop_enable', 'dynamic_position_enable',
+    )
+
+
+# ── 子流程：处理被动平仓 ──────────────────────────────────────────────────────
+
+def _handle_passive_close(
+    p: _RunParams, state: dict, live_amt: float, usdt_free: float,
+) -> dict | None:
     """
-    记录每笔交易对应策略的绩效，用于策略自动降权。
+    检测到交易所实际持仓为 0（条件单已触发），处理被动平仓。
+    返回更新后的 state；若未触发被动平仓，返回 None。
     """
+    if live_amt != 0.0:
+        return None
+
+    est_fill, fill_src = _fetch_passive_fill_price(p.ex, p.symbol, state)
+
+    is_long = state["position_side"] == "long"
+    gross = (
+        (est_fill - state["entry_price"]) if is_long
+        else (state["entry_price"] - est_fill)
+    ) * state["position_amount"] * p.contract_size
+    close_fee = state["position_amount"] * p.contract_size * est_fill * p.fee_rate
+    net_pnl = gross - (state["open_fee"] + close_fee)
+
+    record_trade(p.user_id,
+                 "sell" if is_long else "buy",
+                 est_fill,
+                 state["position_amount"],
+                 p.symbol, "被动平仓(SL/TP)",
+                 net_pnl, fill_src)
+
+    record_strategy_performance(
+        p.user_id, state.get("strategy_name", ""), net_pnl
+    )
+
+    current_balance = get_swap_usdt(p.ex)
+    p.rm.notify_trade_result(net_pnl, current_balance)
+    persist_risk_state(p.user_id, p.rm)
+
+    pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
+    p.logger.info(
+        f"{p.tag} 仓位已被动平仓，净盈亏={net_pnl:+.2f}U ({fill_src})"
+    )
+    _side_label = "多" if is_long else "空"
+    p.notify(
+        f"{pnl_emoji} <b>{p.username} 平仓（托管单触发）</b>\n"
+        f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
+        f"入场价: {state['entry_price']:.2f} → 出场价: {est_fill:.2f}\n"
+        f"止损: {state['active_sl']:.2f} | 止盈: {state['active_tp1']:.2f}\n"
+        f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
+        f"来源: {fill_src}"
+    )
+    if p.rm.is_fused:
+        p.notify(
+            f"🚨 <b>{p.username} 风控熔断！</b>\n"
+            f"连续亏损 {p.rm.consecutive_losses} 次，Bot 已暂停。\n"
+            f"恢复请在控制台点击「恢复熔断」。"
+        )
+    clear_state(p.user_id)
+    return load_state(p.user_id)
+
+
+# ── 子流程：Regime 切换旧仓管理 ───────────────────────────────────────────────
+
+def _handle_regime_transition(
+    p: _RunParams, state: dict, regime_result: dict,
+    current_price: float,
+) -> dict:
+    """
+    V4.0 Regime 切换旧仓管理：方向性切换时收紧止损或平掉旧仓。
+    返回可能更新后的 state。
+    """
+    transition_action = regime_result.get("transition_action")
+    transition_urgency = regime_result.get("transition_urgency", 0.0)
+    if not transition_action or state["position_amount"] <= 0:
+        return state
+
+    is_long = state["position_side"] == "long"
+    should_close = False
+
+    if transition_action == "close_long" and is_long:
+        should_close = True
+    elif transition_action == "close_short" and not is_long:
+        should_close = True
+    elif transition_action == "tighten_sl":
+        state = _tighten_sl_on_regime_switch(p, state, is_long)
+        return state
+
+    if not should_close:
+        return state
+
+    close_side = "sell" if is_long else "buy"
+    pos_side = "long" if is_long else "short"
+    cancel_all_algo(p.ex, p.symbol, logger=p.logger, notify=p.notify, tag=p.tag)
+
+    close_params = {"tdMode": "cross", "reduceOnly": True}
+    if p.cached_pos_mode == "hedge":
+        close_params["posSide"] = pos_side
+
     try:
-        from execution.db_handler import get_conn
-        conn = get_conn()
-        conn.execute("""
-            INSERT INTO strategy_performance
-              (user_id, strategy_name, pnl, recorded_at)
-            VALUES (?, ?, ?, datetime('now'))
-        """, (user_id, strategy_name, pnl))
-        conn.commit()
-    except Exception:
-        pass  # 表可能尚未创建，静默失败
+        order = p.ex.create_order(
+            p.symbol, "market", close_side,
+            state["position_amount"], params=close_params
+        )
+        fill_price = float(order.get("average") or order.get("price") or current_price)
+        entry = state["entry_price"]
+        gross = (
+            (fill_price - entry) if is_long
+            else (entry - fill_price)
+        ) * state["position_amount"] * p.contract_size
+        close_fee = state["position_amount"] * p.contract_size * fill_price * p.fee_rate
+        net_pnl = gross - (state["open_fee"] + close_fee)
+
+        record_trade(p.user_id, close_side, fill_price,
+                     state["position_amount"], p.symbol, "平仓",
+                     net_pnl, f"Regime切换: {transition_action}")
+        record_strategy_performance(
+            p.user_id, state.get("strategy_name", ""), net_pnl
+        )
+        usdt_free = get_swap_usdt(p.ex)
+        p.rm.notify_trade_result(net_pnl, usdt_free)
+        persist_risk_state(p.user_id, p.rm)
+
+        pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
+        _side_label = "多" if is_long else "空"
+        p.logger.info(
+            f"{p.tag} ⚡ Regime切换平仓: {transition_action}, "
+            f"净盈亏={net_pnl:+.2f}U, 紧急度={transition_urgency:.2f}"
+        )
+        p.notify(
+            f"{pnl_emoji} <b>{p.username} Regime切换平仓</b>\n"
+            f"品种: {p.symbol} | 方向: {_side_label}\n"
+            f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
+            f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
+            f"操作: {transition_action} | 紧急度: {transition_urgency:.0%}"
+        )
+        clear_state(p.user_id)
+        state = load_state(p.user_id)
+    except Exception as e:
+        p.logger.error(f"{p.tag} ⚠️ Regime切换平仓失败: {e}")
+        p.notify(
+            f"⚠️ <b>{p.username} Regime切换平仓失败</b>\n"
+            f"操作: {transition_action}\n错误: {str(e)[:200]}"
+        )
+
+    return state
 
 
-def _get_strategy_win_rate(user_id: int, strategy_name: str,
-                           lookback: int = 20) -> float:
+def _tighten_sl_on_regime_switch(p: _RunParams, state: dict, is_long: bool) -> dict:
+    """Regime 切换时收紧止损：将 SL 向入场价方向移动。"""
+    if state["active_sl"] <= 0 or state["entry_price"] <= 0:
+        return state
+
+    old_sl = state["active_sl"]
+    entry = state["entry_price"]
+
+    if is_long:
+        new_sl = old_sl + abs(entry - old_sl) * _SL_TIGHTEN_RATIO
+        should_update = new_sl > old_sl
+        close_side, pos_side = "sell", "long"
+    else:
+        new_sl = old_sl - abs(old_sl - entry) * _SL_TIGHTEN_RATIO
+        should_update = new_sl < old_sl
+        close_side, pos_side = "buy", "short"
+
+    if not should_update:
+        return state
+
+    cancel_all_algo(p.ex, p.symbol, logger=p.logger, notify=p.notify, tag=p.tag)
+    sl_ord = place_algo(p.ex, p.symbol, close_side, state["position_amount"],
+                        new_sl, pos_side, "sl")
+    tp_price = state.get("active_tp1", 0)
+    tp_ord = None
+    if tp_price > 0:
+        tp_ord = place_algo(p.ex, p.symbol, close_side, state["position_amount"],
+                            tp_price, pos_side, "tp")
+    state["active_sl"] = new_sl
+    state["exchange_order_ids"] = {
+        "sl_order": sl_ord.get("id") if sl_ord else None,
+        "tp_order": tp_ord.get("id") if tp_ord else None,
+    }
+    save_state(p.user_id, state)
+    p.logger.info(f"{p.tag} ⚡ Regime切换收紧SL: {old_sl:.2f} → {new_sl:.2f}")
+    return state
+
+
+# ── 子流程：开仓 ──────────────────────────────────────────────────────────────
+
+def _handle_open_position(
+    p: _RunParams, state: dict, signal: dict,
+    current_price: float, usdt_free: float, df,
+) -> dict | None:
     """
-    获取某策略最近 N 笔交易的胜率。
-    返回 [0, 1]，无数据返回 0.5（默认中性）。
+    空仓时根据信号开仓。
+    返回更新后的 state；若未开仓则返回 None。
     """
+    action = signal["action"]
+    if state["position_amount"] != 0 or action not in ("BUY", "SELL"):
+        return None
+
+    reason    = signal["reason"]
+    target_sl = signal["sl"]
+    target_tp = signal["tp1"]
+
+    price_risk = abs(current_price - target_sl) * p.contract_size
+    fee_risk   = (current_price + abs(target_sl)) * p.contract_size * p.fee_rate
+    risk_per   = price_risk + fee_risk
+    if risk_per <= 0:
+        p.logger.warning(f"{p.tag} 风险计算异常（risk_per={risk_per}），跳过")
+        return None
+
+    # V4.0: 动态风险比例
+    effective_risk = p.rm.get_effective_risk_pct(p.risk_pct)
+    contracts = int(math.floor(usdt_free * effective_risk / risk_per))
+
+    if effective_risk != p.risk_pct:
+        p.logger.info(
+            f"{p.tag} 📊 动态风险: base={p.risk_pct*100:.2f}% → "
+            f"effective={effective_risk*100:.2f}% "
+            f"(回撤×{p.rm.drawdown_scale:.2f} "
+            f"equity×{p.rm.equity_curve_scale:.2f} "
+            f"regime×{p.rm.regime_scale:.2f})"
+        )
+
+    # V4.0: 信号质量仓位缩放
+    contracts = _apply_signal_quality_scaling(p, contracts)
+    if contracts == 0:
+        return None  # 信号质量太低，跳过
+
+    # V1.5: 策略过渡期半仓
+    if p.use_auto and p.selector is not None and p.selector.in_transition:
+        contracts = max(1, contracts // 2)
+        p.logger.info(f"{p.tag} ⚠️ 策略过渡期，半仓试探: {contracts} 张")
+
+    # max_trade_amount 金额上限换算为张数
+    denom = current_price * p.contract_size / p.leverage
+    max_contracts_by_amount = int(math.floor(
+        p.rm.max_trade_amount / denom
+    )) if denom > 0 else contracts
+    contracts = min(contracts, max_contracts_by_amount)
+
+    if contracts < 1:
+        p.logger.info(f"{p.tag} 仓位计算 <1 张（止损太宽或余额不足），跳过")
+        return None
+
+    if not p.rm.check_order(p.symbol, action.lower(), contracts):
+        return None
+
+    open_side  = "buy"  if action == "BUY"  else "sell"
+    pos_side   = "long" if action == "BUY"  else "short"
+    close_side = "sell" if action == "BUY"  else "buy"
+
+    open_params = {"tdMode": "cross"}
+    if p.cached_pos_mode == "hedge":
+        open_params["posSide"] = pos_side
+
+    order = p.ex.create_order(
+        p.symbol, "market", open_side, contracts, params=open_params
+    )
+    if not order:
+        p.logger.error(f"{p.tag} 开仓失败")
+        return None
+
+    fill_price = float(order.get("average") or order.get("price") or current_price)
+
+    tp1_contracts = contracts // 2 if contracts >= 2 else contracts
+    sl_ord = place_algo(p.ex, p.symbol, close_side, contracts,
+                        target_sl, pos_side, "sl")
+    tp_ord = place_algo(p.ex, p.symbol, close_side, tp1_contracts,
+                        target_tp, pos_side, "tp")
+
+    if not sl_ord:
+        # SL 挂单失败 → 紧急平仓
+        _emergency_rollback(p, close_side, pos_side, contracts, state)
+        return load_state(p.user_id)
+
+    notional    = contracts * p.contract_size * fill_price
+    open_fee    = notional * p.fee_rate
+    margin_used = notional / p.leverage
+
+    state.update({
+        "position_amount":  contracts,
+        "position_side":    pos_side,
+        "entry_price":      fill_price,
+        "active_sl":        target_sl,
+        "active_tp1":       target_tp,
+        "active_tp2":       signal.get("tp2", 0.0),
+        "margin_used":      margin_used,
+        "open_fee":         open_fee,
+        "strategy_name":    p.strategy.name,
+        "signal_reason":    reason,
+        "entry_time":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "exchange_order_ids": {
+            "sl_order": sl_ord.get("id") if sl_ord else None,
+            "tp_order": tp_ord.get("id") if tp_ord else None,
+        },
+    })
+    save_state(p.user_id, state)
+    record_trade(p.user_id, open_side, fill_price, contracts,
+                 p.symbol, "开仓", 0.0, reason)
+
+    emoji = "🟢" if action == "BUY" else "🔴"
+    p.notify(
+        f"{emoji} <b>{p.username} {'开多' if action=='BUY' else '开空'}</b>\n"
+        f"品种: {p.symbol} | 杠杆: {p.leverage}x\n"
+        f"入场价: {fill_price:.2f} | 数量: {contracts}张\n"
+        f"止损: {target_sl:.2f} | 止盈: {target_tp:.2f}\n"
+        f"保证金: ~{margin_used:.2f} U | 风险: ~{usdt_free * p.risk_pct:.2f} U\n"
+        f"策略: {p.strategy.name} | 原因: {reason}"
+    )
+    return state
+
+
+def _apply_signal_quality_scaling(p: _RunParams, contracts: int) -> int:
+    """根据信号质量和策略胜率缩放仓位，返回 0 表示跳过开仓。"""
+    if not (p.dynamic_position_enable and p.use_auto and p.selector is not None):
+        return contracts
+
+    signal_quality = getattr(p.selector, '_signal_quality_score', 100)
+    if signal_quality < _LOW_SIGNAL_QUALITY_SKIP:
+        p.logger.info(
+            f"{p.tag} 📊 信号质量={signal_quality:.0f} < {_LOW_SIGNAL_QUALITY_SKIP}，跳过开仓"
+        )
+        return 0
+    elif signal_quality < _MID_SIGNAL_QUALITY:
+        sq_scale = max(_MIN_SIGNAL_QUALITY_SCALE, signal_quality / 100.0)
+        contracts = max(1, int(contracts * sq_scale))
+        p.logger.info(
+            f"{p.tag} 📊 信号质量={signal_quality:.0f}，仓位缩放={sq_scale:.2f} → {contracts} 张"
+        )
+
+    # V2.5: 策略绩效降权
+    strat_wr = get_strategy_win_rate(p.user_id, p.strategy.name)
+    if strat_wr < _LOW_WIN_RATE_THRESHOLD:
+        contracts = max(1, int(contracts * _LOW_WIN_RATE_SCALE))
+        p.logger.info(
+            f"{p.tag} ⚠️ 策略 {p.strategy.name} 近期胜率低 "
+            f"({strat_wr:.0%})，降权仓位: {contracts} 张"
+        )
+    return contracts
+
+
+def _emergency_rollback(
+    p: _RunParams, close_side: str, pos_side: str,
+    contracts: int, state: dict,
+):
+    """SL 挂单失败后紧急平仓。"""
+    p.logger.error(f"{p.tag} 🚨 SL 挂单失败！回滚平仓！")
+    p.notify(f"🚨 <b>{p.username}</b> SL 挂单失败，已紧急平仓！")
+    cancel_all_algo(p.ex, p.symbol, logger=p.logger, notify=p.notify, tag=p.tag)
+
     try:
-        from execution.db_handler import get_conn
-        conn = get_conn()
-        rows = conn.execute(
-            "SELECT pnl FROM strategy_performance "
-            "WHERE user_id=? AND strategy_name=? "
-            "ORDER BY id DESC LIMIT ?",
-            (user_id, strategy_name, lookback)
-        ).fetchall()
-        if not rows or len(rows) < 3:
-            return 0.5
-        wins = sum(1 for r in rows if r[0] > 0)
-        return wins / len(rows)
-    except Exception:
-        return 0.5
+        p.ex.create_order(
+            p.symbol, "market", close_side, contracts,
+            params={
+                "tdMode": "cross", "reduceOnly": True,
+                **({"posSide": pos_side} if p.cached_pos_mode == "hedge" else {}),
+            }
+        )
+        p.logger.info(f"{p.tag} 紧急平仓已执行")
+    except Exception as rollback_err:
+        p.logger.error(f"{p.tag} 🚨🚨 紧急平仓也失败！请立即人工处理！{rollback_err}")
+        p.notify(
+            f"🚨🚨 <b>{p.username} 紧急平仓失败！</b>\n"
+            f"SL 挂单失败且平仓指令也报错，请立即人工检查持仓！\n"
+            f"错误：{str(rollback_err)[:200]}"
+        )
+        state["position_side"]   = "unknown_rollback_failed"
+        state["position_amount"] = contracts
+        save_state(p.user_id, state)
+
+
+# ── 子流程：持仓管理（TP1分批、反转、追踪止损、时间止损）──────────────────────
+
+def _handle_active_position(
+    p: _RunParams, state: dict, signal: dict,
+    current_price: float, df,
+) -> dict | None:
+    """
+    有仓位时的管理逻辑。
+    返回更新后的 state；若仅正常持仓不需要特殊处理则返回 None。
+    """
+    if state["position_amount"] <= 0:
+        return None
+
+    is_long      = state["position_side"] == "long"
+    close_side   = "sell" if is_long else "buy"
+    pos_side_str = "long" if is_long else "short"
+    entry        = state["entry_price"]
+    action       = signal["action"]
+    reason       = signal["reason"]
+
+    # ── TP1 分批止盈 ──────────────────────────────────────────────────────
+    if not state.get("has_taken_partial_profit") and state["position_amount"] >= 2:
+        partial_result = _check_tp1_partial(p, state, is_long, close_side, pos_side_str, entry)
+        if partial_result is not None:
+            return partial_result
+
+    # ── 判断是否需要平仓 ──────────────────────────────────────────────────
+    close_reason = ""
+    if is_long and action == "SELL":
+        close_reason = f"策略反转: {reason}"
+    if not is_long and action == "BUY":
+        close_reason = f"策略反转: {reason}"
+
+    # ── V2.5: Trailing Stop ───────────────────────────────────────────────
+    if p.trailing_stop_enable and not close_reason and state["position_amount"] > 0:
+        _do_trailing_stop(
+            state, current_price, is_long, entry, df,
+            p.trailing_stop_trigger, p.trailing_stop_distance,
+            p.ex, p.symbol, close_side, pos_side_str,
+            p.logger, p.notify, p.tag, p.user_id,
+        )
+
+    # ── V2.5: 时间止损 ───────────────────────────────────────────────────
+    if p.time_stop_enable and not close_reason and state["position_amount"] > 0:
+        close_reason = _check_time_stop(state, is_long, entry, current_price, p)
+
+    if not close_reason:
+        return None
+
+    # ── 执行平仓 ──────────────────────────────────────────────────────────
+    return _execute_close(p, state, is_long, close_side, pos_side_str,
+                          entry, current_price, close_reason)
+
+
+def _check_tp1_partial(
+    p: _RunParams, state: dict, is_long: bool,
+    close_side: str, pos_side_str: str, entry: float,
+) -> dict | None:
+    """检测 TP1 是否已触发（交易所实际仓位减少），执行分批止盈。"""
+    total_amt = state["position_amount"]
+    live_amt_check = live_position_amount(p.ex, p.symbol)
+    tp1_amt = total_amt // 2
+    remaining = total_amt - tp1_amt
+
+    if not (0 < live_amt_check <= remaining):
+        return None
+
+    p.logger.info(f"{p.tag} TP1已触发，移SL至保本，挂TP2")
+    cancel_all_algo(p.ex, p.symbol, logger=p.logger, notify=p.notify, tag=p.tag)
+
+    breakeven_sl = entry
+    new_sl = place_algo(p.ex, p.symbol, close_side, live_amt_check,
+                        breakeven_sl, pos_side_str, "sl")
+    tp2_price = state.get("active_tp2", 0.0)
+    new_tp = None
+    if tp2_price > 0:
+        new_tp = place_algo(p.ex, p.symbol, close_side, live_amt_check,
+                            tp2_price, pos_side_str, "tp")
+
+    state["has_taken_partial_profit"] = True
+    state["has_moved_to_breakeven"]   = True
+    state["position_amount"]          = live_amt_check
+    state["active_sl"]                = breakeven_sl
+    state["exchange_order_ids"] = {
+        "sl_order": new_sl.get("id") if new_sl else None,
+        "tp_order": new_tp.get("id") if new_tp else None,
+    }
+    save_state(p.user_id, state)
+
+    p.notify(
+        f"✂️ <b>{p.username} TP1已触发，分批止盈</b>\n"
+        f"剩余仓位: {live_amt_check}张 | SL已移至保本: {breakeven_sl:.2f}\n"
+        f"TP2目标: {tp2_price:.2f}"
+    )
+    return state
+
+
+def _check_time_stop(
+    state: dict, is_long: bool, entry: float,
+    current_price: float, p: _RunParams,
+) -> str:
+    """检查时间止损条件，返回平仓原因（空字符串 = 不平仓）。"""
+    state["entry_bar_count"] = state.get("entry_bar_count", 0) + 1
+    bar_count = state["entry_bar_count"]
+
+    close_reason = ""
+    if bar_count >= p.time_stop_bars:
+        if is_long and current_price >= entry:
+            close_reason = f"时间止损: 持仓{bar_count}根K线"
+        elif not is_long and current_price <= entry:
+            close_reason = f"时间止损: 持仓{bar_count}根K线"
+        elif bar_count >= p.time_stop_bars * _TIME_STOP_FORCE_MULT:
+            close_reason = f"强制时间止损: 持仓{bar_count}根K线"
+
+    save_state(p.user_id, state)
+    return close_reason
+
+
+def _execute_close(
+    p: _RunParams, state: dict, is_long: bool,
+    close_side: str, pos_side_str: str,
+    entry: float, current_price: float, close_reason: str,
+) -> dict:
+    """执行主动平仓（策略反转 / 时间止损等）。"""
+    cancel_all_algo(p.ex, p.symbol, logger=p.logger, notify=p.notify, tag=p.tag)
+
+    close_params = {"tdMode": "cross", "reduceOnly": True}
+    if p.cached_pos_mode == "hedge":
+        close_params["posSide"] = pos_side_str
+
+    order = p.ex.create_order(
+        p.symbol, "market", close_side,
+        state["position_amount"], params=close_params
+    )
+    fill_price = float(
+        order.get("average") or order.get("price") or current_price
+    )
+
+    gross = (
+        (fill_price - entry) if is_long
+        else (entry - fill_price)
+    ) * state["position_amount"] * p.contract_size
+    close_fee = state["position_amount"] * p.contract_size * fill_price * p.fee_rate
+    net_pnl   = gross - (state["open_fee"] + close_fee)
+
+    record_trade(p.user_id, close_side, fill_price,
+                 state["position_amount"], p.symbol, "平仓",
+                 net_pnl, close_reason)
+    record_strategy_performance(
+        p.user_id, state.get("strategy_name", ""), net_pnl
+    )
+
+    usdt_free = get_swap_usdt(p.ex)
+    p.rm.notify_trade_result(net_pnl, usdt_free)
+    persist_risk_state(p.user_id, p.rm)
+
+    if p.rm.is_fused:
+        p.notify(
+            f"🚨 <b>{p.username} 风控熔断！</b>\n"
+            f"连续亏损 {p.rm.consecutive_losses} 次，Bot 已暂停。\n"
+            f"恢复请在控制台点击「恢复熔断」。"
+        )
+
+    clear_state(p.user_id)
+    new_state = load_state(p.user_id)
+
+    pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
+    _side_label = "多" if is_long else "空"
+    p.notify(
+        f"{pnl_emoji} <b>{p.username} 平仓</b>\n"
+        f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
+        f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
+        f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
+        f"原因: {close_reason}"
+    )
+    return new_state
+
+
+# ── K 线拉取 & DataFrame 构建 ─────────────────────────────────────────────────
+
+def _fetch_kline_df(p: _RunParams, strategy):
+    """拉取 K 线并构建 DataFrame，返回 (df, current_price)。"""
+    kline_limit = max(
+        _KLINE_MIN_LIMIT,
+        getattr(strategy, "warmup_bars", 50) * _KLINE_WARMUP_MULTIPLIER + _KLINE_WARMUP_EXTRA
+    )
+    ohlcv = fetch_ohlcv_safe(p.ex, p.symbol, p.timeframe, limit=kline_limit)
+    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df.set_index("timestamp", inplace=True)
+    current_price = float(df.iloc[-1]["close"])
+    return df, current_price
 
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
@@ -694,818 +878,328 @@ def run_user_bot(bot_state, override_strategy: str = None):
                       属性：user_id, username, risk_manager, stop_event
     :param override_strategy: 启动时临时覆盖策略名（不保存到 DB），None 则用用户配置
     """
-    user_id  = bot_state.user_id
-    username = bot_state.username
-    rm: RiskManager = bot_state.risk_manager
-    stop_ev  = bot_state.stop_event
+    p = _RunParams()
+    p.user_id  = bot_state.user_id
+    p.username = bot_state.username
+    p.rm       = bot_state.risk_manager
+    p.stop_ev  = bot_state.stop_event
 
-    # 每用户独立 logger
-    logger = get_user_logger(username)
-    tag    = f"[{username}]"
+    from utils.logger import get_user_logger
+    p.logger = get_user_logger(p.username)
+    p.tag    = f"[{p.username}]"
 
-    # ── 加载有效配置（DB 优先，fallback 到 config.yaml）──────────────────────
-    cfg = _resolve_config(user_id)
+    # ── 加载有效配置 ──────────────────────────────────────────────────────
+    p.cfg = resolve_config(p.user_id)
 
-    # 启动时临时覆盖策略（优先级最高，不写入 DB）
     if override_strategy:
-        cfg["strategy_name"] = override_strategy.upper()
+        p.cfg["strategy_name"] = override_strategy.upper()
 
-    SYMBOL        = cfg["symbol"]
-    TIMEFRAME     = cfg["timeframe"]
-    LEVERAGE      = cfg["leverage"]
-    CONTRACT_SIZE = cfg["contract_size"]
-    FEE_RATE      = cfg["taker_fee_rate"]
-    INTERVAL      = cfg["check_interval"]
-    RISK_PCT      = cfg["risk_pct"]
+    p.symbol        = p.cfg["symbol"]
+    p.timeframe     = p.cfg["timeframe"]
+    p.leverage      = p.cfg["leverage"]
+    p.contract_size = p.cfg["contract_size"]
+    p.fee_rate      = p.cfg["taker_fee_rate"]
+    p.interval      = p.cfg["check_interval"]
+    p.risk_pct      = p.cfg["risk_pct"]
 
-    # ── 策略初始化：AUTO 模式启用选择器，否则固定策略 ──────────────────────
+    # ── 策略初始化 ────────────────────────────────────────────────────────
     global_cfg    = get_config()
-    strategy_name = cfg["strategy_name"]
-    use_auto      = (strategy_name.upper() == "AUTO")
+    strategy_name = p.cfg["strategy_name"]
+    p.use_auto    = (strategy_name.upper() == "AUTO")
 
-    selector = None
-    if use_auto:
+    p.selector = None
+    if p.use_auto:
         from strategy.selector import MarketRegimeSelector
-        selector = MarketRegimeSelector(global_cfg)
-        logger.info(f"{tag} 自动策略选择器已启用")
-        # V2.0: 注册 selector 到 manager，供 API 读取 regime 详情
+        p.selector = MarketRegimeSelector(global_cfg)
+        p.logger.info(f"{p.tag} 自动策略选择器已启用")
         try:
             from core.user_bot import manager as _mgr
-            _mgr.register_user_selector(user_id, selector)
+            _mgr.register_user_selector(p.user_id, p.selector)
         except Exception:
             pass
 
-    strategy = get_strategy(
-        "PA_5S" if use_auto else strategy_name,
-        **({} if use_auto else cfg["strategy_params"])
+    p.strategy = get_strategy(
+        "PA_5S" if p.use_auto else strategy_name,
+        **({} if p.use_auto else p.cfg["strategy_params"])
     )
 
-    # 同步更新 RiskManager 的风控参数（支持 DB 里自定义）
-    rm.max_consecutive_losses = cfg["max_consecutive_losses"]
-    rm.daily_loss_limit_pct   = cfg["daily_loss_limit_pct"]
-    rm.max_trade_amount       = cfg["max_trade_amount"]
+    # 同步风控参数
+    p.rm.max_consecutive_losses = p.cfg["max_consecutive_losses"]
+    p.rm.daily_loss_limit_pct   = p.cfg["daily_loss_limit_pct"]
+    p.rm.max_trade_amount       = p.cfg["max_trade_amount"]
 
     try:
-        ex = get_user_exchange(user_id)
+        p.ex = get_user_exchange(p.user_id)
     except Exception as e:
-        logger.error(f"{tag} 无法构建 exchange：{e}")
+        p.logger.error(f"{p.tag} 无法构建 exchange：{e}")
         return
 
-    _restore_risk_state(user_id, rm)
-    logger.info(
-        f"{tag} 风控状态已恢复：连亏={rm._consecutive_losses}次，熔断={rm.is_fused}"
+    restore_risk_state(p.user_id, p.rm)
+    p.logger.info(
+        f"{p.tag} 风控状态已恢复：连亏={p.rm._consecutive_losses}次，熔断={p.rm.is_fused}"
     )
 
-    # ── 弱点修复：启动时主动设置当日起始余额 ─────────────────────────────────
-    # 原先 daily_start_balance 在第一笔亏损时才初始化，若首笔已亏则基准偏低。
-    # 现在在 Bot 启动时立即查询余额作为基准，确保日亏熔断计算准确；并写入 daily_balance 以便资产曲线立即有数据。
+    # ── 启动时主动查询余额作为日内基准 ────────────────────────────────────
     try:
-        _startup_balance = _get_swap_usdt(ex)
-        if _startup_balance > 0:
-            rm.set_daily_start_balance(_startup_balance)
-            record_balance(user_id, _startup_balance)
+        startup_balance = get_swap_usdt(p.ex)
+        if startup_balance > 0:
+            p.rm.set_daily_start_balance(startup_balance)
+            record_balance(p.user_id, startup_balance)
     except Exception:
         pass
 
-    notify, tg_err = _load_user_notifier(user_id, logger=logger)
-    if notify is None:
-        if tg_err == "not_configured":
-            logger.warning(
-                f"{tag} ⚠️ 用户未配置 Telegram 通知！开仓/平仓消息将不会推送。"
-                f"请在设置页面配置 Telegram Bot Token 和 Chat ID。"
-            )
-        elif tg_err == "decrypted_empty":
-            logger.warning(f"{tag} ⚠️ Telegram 配置解密后为空，请重新保存配置")
-        else:
-            logger.error(f"{tag} ⚠️ Telegram 配置加载失败: {tg_err}")
+    p.notify = load_notifier(p.user_id, p.username, p.logger)
 
-        # 尝试使用全局 .env 后备（旧版单用户部署兼容）
-        from utils.notifier import _GLOBAL_TOKEN, _GLOBAL_CHAT_ID
-        if _GLOBAL_TOKEN and _GLOBAL_CHAT_ID:
-            notify = send_telegram_msg
-            logger.info(f"{tag} 已 fallback 到全局 .env Telegram 配置")
-        else:
-            # 定义一个空操作 notifier，避免后续调用时 NoneType 崩溃
-            def _noop_notify(msg: str) -> bool:
-                logger.debug(f"{tag} [通知跳过] {msg[:80]}...")
-                return False
-            notify = _noop_notify
-            logger.warning(f"{tag} 全局 Telegram 也未配置，所有通知将被跳过！")
+    p.logger.info(f"{p.tag} Bot 启动，策略={p.cfg['strategy_name']}，品种={p.symbol}")
 
-    logger.info(f"{tag} Bot 启动，策略={cfg['strategy_name']}，品种={SYMBOL}")
-
-    # V2.5: 从 config 加载高级风控参数
+    # V2.5: 高级风控参数
     v25_cfg = global_cfg.get("risk_v25", {})
-    TRAILING_STOP_ENABLE = v25_cfg.get("trailing_stop_enable", True)
-    TRAILING_STOP_TRIGGER = v25_cfg.get("trailing_stop_trigger", 0.5)   # 盈利达 ATR*0.5 后激活
-    TRAILING_STOP_DISTANCE = v25_cfg.get("trailing_stop_distance", 0.8) # 回撤 ATR*0.8 触发
-    TIME_STOP_BARS = v25_cfg.get("time_stop_bars", 24)                  # 最多持仓 24 根K线
-    TIME_STOP_ENABLE = v25_cfg.get("time_stop_enable", True)
-    DYNAMIC_POSITION_ENABLE = v25_cfg.get("dynamic_position_enable", True)
+    p.trailing_stop_enable   = v25_cfg.get("trailing_stop_enable", True)
+    p.trailing_stop_trigger  = v25_cfg.get("trailing_stop_trigger", 0.5)
+    p.trailing_stop_distance = v25_cfg.get("trailing_stop_distance", 0.8)
+    p.time_stop_bars         = v25_cfg.get("time_stop_bars", 24)
+    p.time_stop_enable       = v25_cfg.get("time_stop_enable", True)
+    p.dynamic_position_enable = v25_cfg.get("dynamic_position_enable", True)
 
-    notify(
-        f"🚀 <b>{username} 的 Bot 已启动</b>\n"
-        f"策略: {cfg['strategy_name']} | 品种: {SYMBOL} | 杠杆: {LEVERAGE}x"
+    p.notify(
+        f"🚀 <b>{p.username} 的 Bot 已启动</b>\n"
+        f"策略: {p.cfg['strategy_name']} | 品种: {p.symbol} | 杠杆: {p.leverage}x"
     )
 
     # 设置杠杆
     try:
-        ex.set_leverage(LEVERAGE, SYMBOL, params={"mgnMode": "cross"})
-        logger.info(f"{tag} 杠杆已设为 {LEVERAGE}x")
+        p.ex.set_leverage(p.leverage, p.symbol, params={"mgnMode": "cross"})
+        p.logger.info(f"{p.tag} 杠杆已设为 {p.leverage}x")
     except Exception as e:
         msg = str(e)
-        # 已知 OKX/ccxt 在某些环境下 set_leverage 会抛出 NoneType + str，
-        # 但实际不一定影响后续交易；这里仅记录为兼容性警告，避免误判为未知故障。
         if 'NoneType' in msg and '+' in msg:
-            logger.warning(f"{tag} 设置杠杆遇到 OKX/ccxt 兼容异常（已跳过）: {msg}")
+            p.logger.warning(f"{p.tag} 设置杠杆遇到 OKX/ccxt 兼容异常（已跳过）: {msg}")
         else:
-            logger.warning(f"{tag} 设置杠杆失败（可能已设置）: {e}")
+            p.logger.warning(f"{p.tag} 设置杠杆失败（可能已设置）: {e}")
 
-    import pandas as pd
-    state = _load_state(user_id)
+    state = load_state(p.user_id)
+    p.cached_pos_mode = detect_pos_mode(p.ex)
+    p.logger.info(f"{p.tag} 持仓模式: {p.cached_pos_mode}")
 
-    cached_pos_mode = _detect_pos_mode(ex)
-    logger.info(f"{tag} 持仓模式: {cached_pos_mode}")
-
-    # ── 启动时订单对账 ────────────────────────────────────────────────────────
-    state = _reconcile_orders(ex, SYMBOL, state, logger, notify, tag)
+    # ── 启动时订单对账 ────────────────────────────────────────────────────
+    state = _reconcile_orders(p.ex, p.symbol, state, p.logger, p.notify, p.tag)
     if state["position_amount"] > 0:
-        _save_state(user_id, state)
+        save_state(p.user_id, state)
 
     _current_date = datetime.now().strftime('%Y-%m-%d')
-
-    # 连续查询失败计数（用于网络持续抖动告警）
     _pos_query_fail_count = 0
-    _POS_QUERY_FAIL_ALERT = 5   # 连续失败 N 次后告警
-
-    # 限频退避状态
+    _zero_bal_count = 0
     _rate_limit_until = 0.0
 
-    while not stop_ev.is_set():
+    while not p.stop_ev.is_set():
         try:
-            # ── 限频退避等待 ─────────────────────────────────────────────────
+            # ── 限频退避 ──────────────────────────────────────────────────
             now_ts = time.time()
             if now_ts < _rate_limit_until:
                 wait_sec = int(_rate_limit_until - now_ts)
-                logger.warning(f"{tag} 限频退避中，等待 {wait_sec}s")
-                stop_ev.wait(min(wait_sec, INTERVAL))
+                p.logger.warning(f"{p.tag} 限频退避中，等待 {wait_sec}s")
+                p.stop_ev.wait(min(wait_sec, p.interval))
                 continue
 
-            # ── 跨日检测 ─────────────────────────────────────────────────────
+            # ── 跨日检测 ──────────────────────────────────────────────────
             today = datetime.now().strftime('%Y-%m-%d')
             if today != _current_date:
                 _current_date = today
-                current_bal_for_reset = _get_swap_usdt(ex)
-                rm.reset_daily(current_bal_for_reset if current_bal_for_reset > 0 else None)
-                _save_risk_state(user_id, rm)
-                logger.info(f"{tag} 跨日重置日亏状态，新日期: {today}")
-                notify(
-                    f"📅 <b>{username}</b> 新的一天开始，日内风控已重置。\n"
-                    f"起始余额: {current_bal_for_reset:.2f} U"
+                current_bal = get_swap_usdt(p.ex)
+                p.rm.reset_daily(current_bal if current_bal > 0 else None)
+                persist_risk_state(p.user_id, p.rm)
+                p.logger.info(f"{p.tag} 跨日重置日亏状态，新日期: {today}")
+                p.notify(
+                    f"📅 <b>{p.username}</b> 新的一天开始，日内风控已重置。\n"
+                    f"起始余额: {current_bal:.2f} U"
                 )
 
-            # ── 熔断检查 ─────────────────────────────────────────────────────
-            if rm.is_fused:
-                logger.warning(f"{tag} 🚨 风控熔断中，跳过本轮")
-                stop_ev.wait(INTERVAL)
+            # ── 熔断检查 ──────────────────────────────────────────────────
+            if p.rm.is_fused:
+                p.logger.warning(f"{p.tag} 🚨 风控熔断中，跳过本轮")
+                p.stop_ev.wait(p.interval)
                 continue
 
-            # ── 余额 ─────────────────────────────────────────────────────────
-            usdt_free = _get_swap_usdt(ex)
-            _zbc_key = '_zbc_' + str(user_id)
+            # ── 余额 ─────────────────────────────────────────────────────
+            usdt_free = get_swap_usdt(p.ex)
             if usdt_free > 0:
-                record_balance(user_id, usdt_free)
-                if getattr(run_user_bot, _zbc_key, 0) > 0:
-                    setattr(run_user_bot, _zbc_key, 0)
+                record_balance(p.user_id, usdt_free)
+                _zero_bal_count = 0
             else:
-                _zero_bal_count = getattr(run_user_bot, _zbc_key, 0) + 1
-                setattr(run_user_bot, _zbc_key, _zero_bal_count)
-                logger.warning(f"{tag} ⚠️ 余额获取为 0（连续第 {_zero_bal_count} 次）")
-                if _zero_bal_count == 5:
-                    # 连续 5 轮（约 25 分钟）拿不到余额，推送一次通知
-                    alert_key = f"{user_id}:zero_balance"
-                    if _should_alert(alert_key, 3600):
-                        notify(
-                            f"⚠️ <b>{username}</b> 连续 {_zero_bal_count} 轮余额为 0，"
+                _zero_bal_count += 1
+                p.logger.warning(f"{p.tag} ⚠️ 余额获取为 0（连续第 {_zero_bal_count} 次）")
+                if _zero_bal_count == _ZERO_BALANCE_ALERT_ROUNDS:
+                    alert_key = f"{p.user_id}:zero_balance"
+                    if should_alert(alert_key, _ALERT_COOLDOWN_LONG_SEC):
+                        p.notify(
+                            f"⚠️ <b>{p.username}</b> 连续 {_zero_bal_count} 轮余额为 0，"
                             f"无法开仓。\n请检查：\n"
                             f"• 模拟盘/实盘 Key 是否匹配\n"
                             f"• 合约账户是否有 USDT\n"
                             f"• API Key 权限是否包含「读取」"
                         )
 
-            # ── 仓位核对（检测被动平仓）──────────────────────────────────────
+            # ── 仓位核对（检测被动平仓）────────────────────────────────────
             if state["position_amount"] > 0:
-                live_amt = _live_position_amount(ex, SYMBOL, logger=logger, tag=tag)
+                live_amt = live_position_amount(p.ex, p.symbol, logger=p.logger, tag=p.tag)
 
                 if live_amt == -1.0:
-                    # 查询失败，累计计数并按需告警
                     _pos_query_fail_count += 1
-                    logger.warning(
-                        f"{tag} 持仓查询失败（连续第{_pos_query_fail_count}次）"
+                    p.logger.warning(
+                        f"{p.tag} 持仓查询失败（连续第{_pos_query_fail_count}次）"
                     )
-                    if _pos_query_fail_count >= _POS_QUERY_FAIL_ALERT:
-                        alert_key = f"{user_id}:pos_query_fail"
-                        if _should_alert(alert_key, 600):
-                            notify(
-                                f"⚠️ <b>{username}</b> 持仓查询连续失败 "
+                    if _pos_query_fail_count >= _POS_QUERY_FAIL_ALERT_THRESHOLD:
+                        alert_key = f"{p.user_id}:pos_query_fail"
+                        if should_alert(alert_key, _ALERT_COOLDOWN_DEFAULT_SEC * 2):
+                            p.notify(
+                                f"⚠️ <b>{p.username}</b> 持仓查询连续失败 "
                                 f"{_pos_query_fail_count} 次，请检查网络或 API 状态"
                             )
-                    stop_ev.wait(INTERVAL)
+                    p.stop_ev.wait(p.interval)
                     continue
 
-                _pos_query_fail_count = 0   # 查询成功，重置计数
+                _pos_query_fail_count = 0
 
-                if live_amt == 0.0:
-                    # 托管止损/止盈单已触发，拉取真实成交价
-                    est_fill, fill_src = _fetch_passive_fill_price(ex, SYMBOL, state)
-
-                    is_long = state["position_side"] == "long"
-                    gross = (
-                        (est_fill - state["entry_price"]) if is_long
-                        else (state["entry_price"] - est_fill)
-                    ) * state["position_amount"] * CONTRACT_SIZE
-                    close_fee = state["position_amount"] * CONTRACT_SIZE * est_fill * FEE_RATE
-                    net_pnl = gross - (state["open_fee"] + close_fee)
-
-                    record_trade(user_id,
-                                 "sell" if is_long else "buy",
-                                 est_fill,
-                                 state["position_amount"],
-                                 SYMBOL, "被动平仓(SL/TP)",
-                                 net_pnl,
-                                 fill_src)
-
-                    # V2.5: 记录策略绩效
-                    _record_strategy_performance(
-                        user_id, state.get("strategy_name", ""), net_pnl
-                    )
-
-                    current_balance = _get_swap_usdt(ex)
-                    rm.notify_trade_result(net_pnl, current_balance)
-                    _save_risk_state(user_id, rm)
-
-                    pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
-                    logger.info(
-                        f"{tag} 仓位已被动平仓，净盈亏={net_pnl:+.2f}U ({fill_src})"
-                    )
-                    _entry = state["entry_price"]
-                    _side_label = "多" if is_long else "空"
-                    notify(
-                        f"{pnl_emoji} <b>{username} 平仓（托管单触发）</b>\n"
-                        f"品种: {SYMBOL} | 杠杆: {LEVERAGE}x | 方向: {_side_label}\n"
-                        f"入场价: {_entry:.2f} → 出场价: {est_fill:.2f}\n"
-                        f"止损: {state['active_sl']:.2f} | 止盈: {state['active_tp1']:.2f}\n"
-                        f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-                        f"来源: {fill_src}"
-                    )
-                    if rm.is_fused:
-                        notify(
-                            f"🚨 <b>{username} 风控熔断！</b>\n"
-                            f"连续亏损 {rm.consecutive_losses} 次，Bot 已暂停。\n"
-                            f"恢复请在控制台点击「恢复熔断」。"
-                        )
-                    _clear_state(user_id)
-                    state = _load_state(user_id)
-                    stop_ev.wait(INTERVAL)
+                new_state = _handle_passive_close(p, state, live_amt, usdt_free)
+                if new_state is not None:
+                    state = new_state
+                    p.stop_ev.wait(p.interval)
                     continue
 
-            # ── K 线 & 信号 ──────────────────────────────────────────────────
-            # Fix: limit 动态适配策略预热期，确保实盘信号窗口与回测一致
-            kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
-            ohlcv = _fetch_ohlcv_safe(ex, SYMBOL, TIMEFRAME, limit=kline_limit)
-            df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df.set_index("timestamp", inplace=True)
+            # ── K 线 & 信号 ───────────────────────────────────────────────
+            df, current_price = _fetch_kline_df(p, p.strategy)
 
-            current_price = float(df.iloc[-1]["close"])
+            # ── AUTO 模式：每轮评估市场状态 ───────────────────────────────
+            if p.use_auto and p.selector is not None:
+                new_strategy, regime_result = p.selector.get_strategy(df, p.symbol)
 
-            # ── AUTO模式：每轮评估市场状态，按需热切换策略 ──────────────────
-            if use_auto and selector is not None:
-                new_strategy, regime_result = selector.get_strategy(df, SYMBOL)
-
-                # V4.0: 风控 Regime 感知 — 每轮更新 regime 上下文
-                rm.set_regime_context(
+                # V4.0: 风控 Regime 感知
+                p.rm.set_regime_context(
                     regime_result.get("regime", "unknown"),
                     regime_result.get("confidence", 0.5),
                     regime_result.get("transition_action"),
                 )
 
-                # V4.0: Regime 切换旧仓管理 — 方向性切换时平掉旧仓
-                _transition_action = regime_result.get("transition_action")
-                _transition_urgency = regime_result.get("transition_urgency", 0.0)
-                if _transition_action and state["position_amount"] > 0:
-                    is_long = state["position_side"] == "long"
-                    should_close = False
-                    if _transition_action == "close_long" and is_long:
-                        should_close = True
-                    elif _transition_action == "close_short" and not is_long:
-                        should_close = True
-                    elif _transition_action == "tighten_sl":
-                        # 收紧止损：将 SL 移近 50%
-                        if state["active_sl"] > 0 and state["entry_price"] > 0:
-                            old_sl = state["active_sl"]
-                            entry = state["entry_price"]
-                            if is_long:
-                                new_sl = old_sl + abs(entry - old_sl) * 0.5
-                                if new_sl > old_sl:
-                                    close_side_t = "sell"
-                                    pos_side_t = "long"
-                                    _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
-                                    sl_ord = _place_algo(ex, SYMBOL, close_side_t, state["position_amount"],
-                                                         new_sl, pos_side_t, "sl")
-                                    tp_price = state.get("active_tp1", 0)
-                                    tp_ord = None
-                                    if tp_price > 0:
-                                        tp_ord = _place_algo(ex, SYMBOL, close_side_t, state["position_amount"],
-                                                             tp_price, pos_side_t, "tp")
-                                    state["active_sl"] = new_sl
-                                    state["exchange_order_ids"] = {
-                                        "sl_order": sl_ord.get("id") if sl_ord else None,
-                                        "tp_order": tp_ord.get("id") if tp_ord else None,
-                                    }
-                                    _save_state(user_id, state)
-                                    logger.info(f"{tag} ⚡ Regime切换收紧SL: {old_sl:.2f} → {new_sl:.2f}")
-                            else:
-                                new_sl = old_sl - abs(old_sl - entry) * 0.5
-                                if new_sl < old_sl:
-                                    close_side_t = "buy"
-                                    pos_side_t = "short"
-                                    _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
-                                    sl_ord = _place_algo(ex, SYMBOL, close_side_t, state["position_amount"],
-                                                         new_sl, pos_side_t, "sl")
-                                    tp_price = state.get("active_tp1", 0)
-                                    tp_ord = None
-                                    if tp_price > 0:
-                                        tp_ord = _place_algo(ex, SYMBOL, close_side_t, state["position_amount"],
-                                                             tp_price, pos_side_t, "tp")
-                                    state["active_sl"] = new_sl
-                                    state["exchange_order_ids"] = {
-                                        "sl_order": sl_ord.get("id") if sl_ord else None,
-                                        "tp_order": tp_ord.get("id") if tp_ord else None,
-                                    }
-                                    _save_state(user_id, state)
-                                    logger.info(f"{tag} ⚡ Regime切换收紧SL: {old_sl:.2f} → {new_sl:.2f}")
+                # V4.0: Regime 切换旧仓管理
+                state = _handle_regime_transition(p, state, regime_result, current_price)
 
-                    if should_close:
-                        close_side_r = "sell" if is_long else "buy"
-                        pos_side_r = "long" if is_long else "short"
-                        _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
-
-                        close_params = {"tdMode": "cross", "reduceOnly": True}
-                        if cached_pos_mode == "hedge":
-                            close_params["posSide"] = pos_side_r
-
-                        try:
-                            order = ex.create_order(
-                                SYMBOL, "market", close_side_r,
-                                state["position_amount"], params=close_params
-                            )
-                            fill_price = float(order.get("average") or order.get("price") or current_price)
-                            entry_r = state["entry_price"]
-                            gross = (
-                                (fill_price - entry_r) if is_long
-                                else (entry_r - fill_price)
-                            ) * state["position_amount"] * CONTRACT_SIZE
-                            close_fee = state["position_amount"] * CONTRACT_SIZE * fill_price * FEE_RATE
-                            net_pnl = gross - (state["open_fee"] + close_fee)
-
-                            record_trade(user_id, close_side_r, fill_price,
-                                         state["position_amount"], SYMBOL, "平仓",
-                                         net_pnl, f"Regime切换: {_transition_action}")
-                            _record_strategy_performance(
-                                user_id, state.get("strategy_name", ""), net_pnl
-                            )
-                            usdt_free = _get_swap_usdt(ex)
-                            rm.notify_trade_result(net_pnl, usdt_free)
-                            _save_risk_state(user_id, rm)
-
-                            pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
-                            _side_label = "多" if is_long else "空"
-                            logger.info(
-                                f"{tag} ⚡ Regime切换平仓: {_transition_action}, "
-                                f"净盈亏={net_pnl:+.2f}U, 紧急度={_transition_urgency:.2f}"
-                            )
-                            notify(
-                                f"{pnl_emoji} <b>{username} Regime切换平仓</b>\n"
-                                f"品种: {SYMBOL} | 方向: {_side_label}\n"
-                                f"入场价: {entry_r:.2f} → 出场价: {fill_price:.2f}\n"
-                                f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-                                f"操作: {_transition_action} | 紧急度: {_transition_urgency:.0%}"
-                            )
-                            _clear_state(user_id)
-                            state = _load_state(user_id)
-                        except Exception as e:
-                            logger.error(f"{tag} ⚠️ Regime切换平仓失败: {e}")
-                            notify(
-                                f"⚠️ <b>{username} Regime切换平仓失败</b>\n"
-                                f"操作: {_transition_action}\n错误: {str(e)[:200]}"
-                            )
-
-                # V1.5: WAIT 观望状态 → 空仓时跳过本轮，有仓位继续监控
+                # V1.5: WAIT 观望
                 if regime_result.get("regime") == "wait" and state["position_amount"] == 0:
-                    logger.info(
-                        f"{tag} 📋 WAIT 观望，跳过开仓 ({regime_result['reason']})"
+                    p.logger.info(
+                        f"{p.tag} 📋 WAIT 观望，跳过开仓 ({regime_result['reason']})"
                     )
-                    stop_ev.wait(INTERVAL)
+                    p.stop_ev.wait(p.interval)
                     continue
 
-                # V4.0: 日内交易次数检查（开仓前判断）
-                if rm.daily_trades_exhausted and state["position_amount"] == 0:
-                    logger.info(f"{tag} 📋 日内交易次数已达上限，跳过开仓")
-                    stop_ev.wait(INTERVAL)
+                # V4.0: 日内交易次数检查
+                if p.rm.daily_trades_exhausted and state["position_amount"] == 0:
+                    p.logger.info(f"{p.tag} 📋 日内交易次数已达上限，跳过开仓")
+                    p.stop_ev.wait(p.interval)
                     continue
 
                 if new_strategy is not None:
-                    old_name = strategy.name
-                    strategy = new_strategy
-                    # 新策略可能需要更多K线，重新拉取
-                    kline_limit = max(200, getattr(strategy, "warmup_bars", 50) * 2 + 10)
-                    ohlcv = _fetch_ohlcv_safe(ex, SYMBOL, TIMEFRAME, limit=kline_limit)
-                    df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-                    df.set_index("timestamp", inplace=True)
-                    current_price = float(df.iloc[-1]["close"])
-                    logger.info(
-                        f"{tag} 策略热切换: {old_name} → {strategy.name} "
+                    old_name = p.strategy.name
+                    p.strategy = new_strategy
+                    df, current_price = _fetch_kline_df(p, p.strategy)
+                    p.logger.info(
+                        f"{p.tag} 策略热切换: {old_name} → {p.strategy.name} "
                         f"({regime_result['reason']})"
                     )
-                    # 空仓时才推送切换通知，有仓位时等平仓后生效
                     if state["position_amount"] == 0:
-                        notify(
-                            f"🔄 <b>{username} 策略已切换</b>\n"
-                            f"新策略: <b>{strategy.name}</b>\n"
+                        p.notify(
+                            f"🔄 <b>{p.username} 策略已切换</b>\n"
+                            f"新策略: <b>{p.strategy.name}</b>\n"
                             f"市场状态: {regime_result['regime'].upper()}\n"
                             f"技术面: {regime_result['tech_regime']} | "
                             f"新闻面: {regime_result['news_regime']}\n"
                             f"置信度: {regime_result['confidence']:.0%}\n"
                             f"信号质量: {regime_result.get('signal_quality', 0):.0f}/100"
                         )
-            signal    = strategy.generate_signal(df)
-            action    = signal["action"]
-            reason    = signal["reason"]
-            target_sl = signal["sl"]
-            target_tp = signal["tp1"]
 
-            logger.info(
-                f"{tag} 信号={action} 价格={current_price:.2f} "
+            signal = p.strategy.generate_signal(df)
+
+            p.logger.info(
+                f"{p.tag} 信号={signal['action']} 价格={current_price:.2f} "
                 f"仓位={state['position_side'] or '空仓'}/{state['position_amount']}张"
             )
 
-            # ══════════════ 空仓 → 开仓 ══════════════════════════════════════
-            if state["position_amount"] == 0 and action in ("BUY", "SELL"):
-                price_risk = abs(current_price - target_sl) * CONTRACT_SIZE
-                fee_risk   = (current_price + abs(target_sl)) * CONTRACT_SIZE * FEE_RATE
-                risk_per   = price_risk + fee_risk
-                if risk_per <= 0:
-                    logger.warning(f"{tag} 风险计算异常（risk_per={risk_per}），跳过")
-                    stop_ev.wait(INTERVAL)
-                    continue
+            # ══════════════ 空仓 → 开仓 ══════════════════════════════════
+            open_result = _handle_open_position(
+                p, state, signal, current_price, usdt_free, df
+            )
+            if open_result is not None:
+                state = open_result
 
-                # V4.0: 使用动态风险比例（综合回撤/equity curve/regime/Kelly）
-                effective_risk = rm.get_effective_risk_pct(RISK_PCT)
-                contracts = int(math.floor(usdt_free * effective_risk / risk_per))
-
-                if effective_risk != RISK_PCT:
-                    logger.info(
-                        f"{tag} 📊 动态风险: base={RISK_PCT*100:.2f}% → "
-                        f"effective={effective_risk*100:.2f}% "
-                        f"(回撤×{rm.drawdown_scale:.2f} "
-                        f"equity×{rm.equity_curve_scale:.2f} "
-                        f"regime×{rm.regime_scale:.2f})"
-                    )
-
-                # V4.0: 信号质量仓位缩放
-                if DYNAMIC_POSITION_ENABLE and use_auto and selector is not None:
-                    signal_quality = getattr(selector, '_signal_quality_score', 100)
-                    if signal_quality < 40:
-                        # 低质量信号不开仓
-                        logger.info(
-                            f"{tag} 📊 信号质量={signal_quality:.0f} < 40，跳过开仓"
-                        )
-                        stop_ev.wait(INTERVAL)
-                        continue
-                    elif signal_quality < 60:
-                        # 中等质量：半仓
-                        sq_scale = max(0.4, signal_quality / 100.0)
-                        contracts = max(1, int(contracts * sq_scale))
-                        logger.info(
-                            f"{tag} 📊 信号质量={signal_quality:.0f}，仓位缩放={sq_scale:.2f} → {contracts} 张"
-                        )
-
-                    # V2.5: 策略绩效降权 - 最近胜率低的策略减仓
-                    strat_wr = _get_strategy_win_rate(user_id, strategy.name)
-                    if strat_wr < 0.35:  # 胜率低于 35%
-                        contracts = max(1, int(contracts * 0.6))
-                        logger.info(
-                            f"{tag} ⚠️ 策略 {strategy.name} 近期胜率低 "
-                            f"({strat_wr:.0%})，降权仓位: {contracts} 张"
-                        )
-
-                # V1.5: 策略切换过渡期，使用半仓试探
-                if use_auto and selector is not None and selector.in_transition:
-                    contracts = max(1, contracts // 2)
-                    logger.info(f"{tag} ⚠️ 策略过渡期，半仓试探: {contracts} 张")
-
-                # Fix: max_trade_amount 是金额(USDT)上限，需换算为张数上限后再比较
-                max_contracts_by_amount = int(math.floor(
-                    rm.max_trade_amount / (current_price * CONTRACT_SIZE / LEVERAGE)
-                )) if (current_price * CONTRACT_SIZE / LEVERAGE) > 0 else contracts
-                contracts = min(contracts, max_contracts_by_amount)
-
-                if contracts < 1:
-                    logger.info(f"{tag} 仓位计算 <1 张（止损太宽或余额不足），跳过")
-                    stop_ev.wait(INTERVAL)
-                    continue
-
-                if not rm.check_order(SYMBOL, action.lower(), contracts):
-                    stop_ev.wait(INTERVAL)
-                    continue
-
-                open_side  = "buy"  if action == "BUY"  else "sell"
-                pos_side   = "long" if action == "BUY"  else "short"
-                close_side = "sell" if action == "BUY"  else "buy"
-
-                open_params = {"tdMode": "cross"}
-                if cached_pos_mode == "hedge":
-                    open_params["posSide"] = pos_side
-
-                order = ex.create_order(
-                    SYMBOL, "market", open_side, contracts, params=open_params
+            # ══════════════ 有仓 → 持仓管理 ══════════════════════════════
+            else:
+                active_result = _handle_active_position(
+                    p, state, signal, current_price, df
                 )
-                if not order:
-                    logger.error(f"{tag} 开仓失败")
-                    stop_ev.wait(INTERVAL)
-                    continue
-
-                fill_price = float(order.get("average") or order.get("price") or current_price)
-
-                tp1_contracts = contracts // 2 if contracts >= 2 else contracts
-
-                sl_ord = _place_algo(ex, SYMBOL, close_side, contracts,
-                                     target_sl, pos_side, "sl")
-                tp_ord = _place_algo(ex, SYMBOL, close_side, tp1_contracts,
-                                     target_tp, pos_side, "tp")
-
-                if not sl_ord:
-                    # SL 挂单失败 → 立即平仓保命
-                    logger.error(f"{tag} 🚨 SL 挂单失败！回滚平仓！")
-                    notify(f"🚨 <b>{username}</b> SL 挂单失败，已紧急平仓！")
-                    _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
-                    # ── Bug fix: 紧急平仓加 try/except ──────────────────────
-                    # 若紧急平仓也失败，必须告警并标记持仓状态，防止下轮误重复开仓。
-                    try:
-                        ex.create_order(
-                            SYMBOL, "market", close_side, contracts,
-                            params={
-                                "tdMode": "cross", "reduceOnly": True,
-                                **({"posSide": pos_side} if cached_pos_mode == "hedge" else {}),
-                            }
-                        )
-                        logger.info(f"{tag} 紧急平仓已执行")
-                    except Exception as rollback_err:
-                        logger.error(f"{tag} 🚨🚨 紧急平仓也失败！请立即人工处理！{rollback_err}")
-                        notify(
-                            f"🚨🚨 <b>{username} 紧急平仓失败！</b>\n"
-                            f"SL 挂单失败且平仓指令也报错，请立即人工检查持仓！\n"
-                            f"错误：{str(rollback_err)[:200]}"
-                        )
-                        # 标记为"未知持仓"，阻止下一轮开新仓，等人工确认
-                        state["position_side"]   = "unknown_rollback_failed"
-                        state["position_amount"] = contracts
-                        _save_state(user_id, state)
-                    stop_ev.wait(INTERVAL)
-                    continue
-
-                notional    = contracts * CONTRACT_SIZE * fill_price
-                open_fee    = notional * FEE_RATE
-                margin_used = notional / LEVERAGE
-
-                state.update({
-                    "position_amount":  contracts,
-                    "position_side":    pos_side,
-                    "entry_price":      fill_price,
-                    "active_sl":        target_sl,
-                    "active_tp1":       target_tp,
-                    "active_tp2":       signal.get("tp2", 0.0),
-                    "margin_used":      margin_used,
-                    "open_fee":         open_fee,
-                    "strategy_name":    strategy.name,
-                    "signal_reason":    reason,
-                    "entry_time":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "exchange_order_ids": {
-                        "sl_order": sl_ord.get("id") if sl_ord else None,
-                        "tp_order": tp_ord.get("id") if tp_ord else None,
-                    },
-                })
-                _save_state(user_id, state)
-                record_trade(user_id, open_side, fill_price, contracts,
-                             SYMBOL, "开仓", 0.0, reason)
-
-                emoji = "🟢" if action == "BUY" else "🔴"
-                notify(
-                    f"{emoji} <b>{username} {'开多' if action=='BUY' else '开空'}</b>\n"
-                    f"品种: {SYMBOL} | 杠杆: {LEVERAGE}x\n"
-                    f"入场价: {fill_price:.2f} | 数量: {contracts}张\n"
-                    f"止损: {target_sl:.2f} | 止盈: {target_tp:.2f}\n"
-                    f"保证金: ~{margin_used:.2f} U | 风险: ~{usdt_free * RISK_PCT:.2f} U\n"
-                    f"策略: {strategy.name} | 原因: {reason}"
-                )
-
-            # ══════════════ 有仓 → TP1到达后移SL到保本 & 检测部分平仓 ══════════
-            elif state["position_amount"] > 0:
-                is_long      = state["position_side"] == "long"
-                close_side   = "sell" if is_long else "buy"
-                pos_side_str = "long" if is_long else "short"
-                total_amt    = state["position_amount"]
-                entry        = state["entry_price"]
-
-                # ── TP1分批止盈 ────────────────────────────────────────────────
-                if not state.get("has_taken_partial_profit") and total_amt >= 2:
-                    live_amt_check = _live_position_amount(ex, SYMBOL)
-                    tp1_amt = total_amt // 2
-                    remaining = total_amt - tp1_amt
-                    if 0 < live_amt_check <= remaining:
-                        logger.info(f"{tag} TP1已触发，移SL至保本，挂TP2")
-                        _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
-
-                        breakeven_sl = entry
-                        new_sl = _place_algo(ex, SYMBOL, close_side, live_amt_check,
-                                             breakeven_sl, pos_side_str, "sl")
-                        tp2_price = state.get("active_tp2", 0.0)
-                        new_tp = None
-                        if tp2_price > 0:
-                            new_tp = _place_algo(ex, SYMBOL, close_side, live_amt_check,
-                                                 tp2_price, pos_side_str, "tp")
-
-                        state["has_taken_partial_profit"] = True
-                        state["has_moved_to_breakeven"]   = True
-                        state["position_amount"]          = live_amt_check
-                        state["active_sl"]                = breakeven_sl
-                        state["exchange_order_ids"] = {
-                            "sl_order": new_sl.get("id") if new_sl else None,
-                            "tp_order": new_tp.get("id") if new_tp else None,
-                        }
-                        _save_state(user_id, state)
-
-                        notify(
-                            f"✂️ <b>{username} TP1已触发，分批止盈</b>\n"
-                            f"剩余仓位: {live_amt_check}张 | SL已移至保本: {breakeven_sl:.2f}\n"
-                            f"TP2目标: {tp2_price:.2f}"
-                        )
-                        stop_ev.wait(INTERVAL)
-                        continue
-
-                # ── 策略反转强制平仓 ───────────────────────────────────────────
-                close_reason = ""
-                if is_long  and action == "SELL": close_reason = f"策略反转: {reason}"
-                if not is_long and action == "BUY":  close_reason = f"策略反转: {reason}"
-
-                # ── V2.5: Trailing Stop (动态追踪止损) ────────────────────────
-                if TRAILING_STOP_ENABLE and not close_reason and state["position_amount"] > 0:
-                    _do_trailing_stop(
-                        state, current_price, is_long, entry, df,
-                        TRAILING_STOP_TRIGGER, TRAILING_STOP_DISTANCE,
-                        ex, SYMBOL, close_side, pos_side_str,
-                        logger, notify, tag, user_id,
-                    )
-
-                # ── V2.5: 时间止损（持仓超 N 根K线强制平仓）────────────────
-                if TIME_STOP_ENABLE and not close_reason and state["position_amount"] > 0:
-                    state["entry_bar_count"] = state.get("entry_bar_count", 0) + 1
-                    if state["entry_bar_count"] >= TIME_STOP_BARS:
-                        # 只在不亏损时执行时间止损（避免亏损放大）
-                        if is_long and current_price >= entry:
-                            close_reason = f"时间止损: 持仓{state['entry_bar_count']}根K线"
-                        elif not is_long and current_price <= entry:
-                            close_reason = f"时间止损: 持仓{state['entry_bar_count']}根K线"
-                        elif state["entry_bar_count"] >= TIME_STOP_BARS * 1.5:
-                            # 超时1.5倍，无论盈亏都平仓
-                            close_reason = f"强制时间止损: 持仓{state['entry_bar_count']}根K线"
-                    _save_state(user_id, state)
-
-                if close_reason:
-                    _cancel_all_algo(ex, SYMBOL, logger=logger, notify=notify, tag=tag)
-
-                    close_params = {"tdMode": "cross", "reduceOnly": True}
-                    if cached_pos_mode == "hedge":
-                        close_params["posSide"] = pos_side_str
-
-                    order = ex.create_order(
-                        SYMBOL, "market", close_side,
-                        state["position_amount"], params=close_params
-                    )
-                    fill_price = float(
-                        order.get("average") or order.get("price") or current_price
-                    )
-
-                    gross = (
-                        (fill_price - entry) if is_long
-                        else (entry - fill_price)
-                    ) * state["position_amount"] * CONTRACT_SIZE
-
-                    close_fee = state["position_amount"] * CONTRACT_SIZE * fill_price * FEE_RATE
-                    net_pnl   = gross - (state["open_fee"] + close_fee)
-
-                    record_trade(user_id, close_side, fill_price,
-                                 state["position_amount"], SYMBOL, "平仓",
-                                 net_pnl, close_reason)
-
-                    # V2.5: 记录策略绩效
-                    _record_strategy_performance(
-                        user_id, state.get("strategy_name", ""), net_pnl
-                    )
-
-                    usdt_free = _get_swap_usdt(ex)
-                    rm.notify_trade_result(net_pnl, usdt_free)
-                    _save_risk_state(user_id, rm)
-
-                    if rm.is_fused:
-                        notify(
-                            f"🚨 <b>{username} 风控熔断！</b>\n"
-                            f"连续亏损 {rm.consecutive_losses} 次，Bot 已暂停。\n"
-                            f"恢复请在控制台点击「恢复熔断」。"
-                        )
-
-                    _clear_state(user_id)
-                    state = _load_state(user_id)
-
-                    pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
-                    _side_label = "多" if is_long else "空"
-                    notify(
-                        f"{pnl_emoji} <b>{username} 平仓</b>\n"
-                        f"品种: {SYMBOL} | 杠杆: {LEVERAGE}x | 方向: {_side_label}\n"
-                        f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
-                        f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-                        f"原因: {close_reason}"
-                    )
+                if active_result is not None:
+                    state = active_result
 
         except ccxt.RateLimitExceeded as e:
-            # 限频：指数退避，等 30s~120s
-            wait_sec = min(120, 30 * (2 ** getattr(e, 'retry_after', 1)))
+            wait_sec = min(
+                _RATE_LIMIT_MAX_WAIT_SEC,
+                _RATE_LIMIT_MIN_WAIT_SEC * (2 ** getattr(e, 'retry_after', 1))
+            )
             _rate_limit_until = time.time() + wait_sec
-            logger.warning(f"{tag} API 限频，退避 {wait_sec}s")
-            alert_key = f"{user_id}:rate_limit"
-            if _should_alert(alert_key, 600):
-                notify(f"⏱️ <b>{username}</b> API 限频，已自动退避 {wait_sec}s")
-            stop_ev.wait(min(wait_sec, INTERVAL))
+            p.logger.warning(f"{p.tag} API 限频，退避 {wait_sec}s")
+            alert_key = f"{p.user_id}:rate_limit"
+            if should_alert(alert_key, _ALERT_COOLDOWN_DEFAULT_SEC * 2):
+                p.notify(f"⏱️ <b>{p.username}</b> API 限频，已自动退避 {wait_sec}s")
+            p.stop_ev.wait(min(wait_sec, p.interval))
             continue
 
         except ccxt.AuthenticationError as e:
-            # API Key 无效：立即停止，不重试
-            logger.error(f"{tag} 🚨 API Key 认证失败，Bot 停止: {e}")
-            notify(
-                f"🚨 <b>{username} API Key 认证失败，Bot 已停止</b>\n"
+            p.logger.error(f"{p.tag} 🚨 API Key 认证失败，Bot 停止: {e}")
+            p.notify(
+                f"🚨 <b>{p.username} API Key 认证失败，Bot 已停止</b>\n"
                 f"请检查：\n"
                 f"• <b>模拟盘/实盘是否一致</b>：在 OKX 模拟盘创建的 Key 需勾选「使用模拟盘」，实盘 Key 勿勾选。\n"
                 f"• <b>IP 白名单</b>：若 OKX 绑定了 IP，请将本服务器 IP 加入白名单。\n"
                 f"在设置页重新配置后，可先点「验证 API Key」再启动 Bot。"
             )
-            stop_ev.set()
+            p.stop_ev.set()
             return
 
         except ccxt.ExchangeNotAvailable as e:
-            # 交易所维护：等待较长时间后重试
-            logger.warning(f"{tag} 交易所维护中，等待 120s: {e}")
-            alert_key = f"{user_id}:maintenance"
-            if _should_alert(alert_key, 1800):   # 30 分钟内只推一次
-                notify(f"🔧 <b>{username}</b> 交易所维护中，Bot 暂停，将自动恢复")
-            stop_ev.wait(120)
+            p.logger.warning(f"{p.tag} 交易所维护中，等待 {_MAINTENANCE_WAIT_SEC}s: {e}")
+            alert_key = f"{p.user_id}:maintenance"
+            if should_alert(alert_key, _MAINTENANCE_ALERT_COOLDOWN_SEC):
+                p.notify(f"🔧 <b>{p.username}</b> 交易所维护中，Bot 暂停，将自动恢复")
+            p.stop_ev.wait(_MAINTENANCE_WAIT_SEC)
             continue
 
         except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
-            # 网络临时故障：短暂等待后正常重试
-            logger.warning(f"{tag} 网络异常，等待重试: {e}")
-            alert_key = f"{user_id}:network_error"
-            if _should_alert(alert_key, 300):
-                notify(f"📡 <b>{username}</b> 网络异常，Bot 将自动重试")
-            stop_ev.wait(15)
+            p.logger.warning(f"{p.tag} 网络异常，等待重试: {e}")
+            alert_key = f"{p.user_id}:network_error"
+            if should_alert(alert_key, _ALERT_COOLDOWN_DEFAULT_SEC):
+                p.notify(f"📡 <b>{p.username}</b> 网络异常，Bot 将自动重试")
+            p.stop_ev.wait(_NETWORK_ERROR_WAIT_SEC)
             continue
 
         except Exception as e:
-            import traceback
             tb_str = traceback.format_exc()
-            logger.error(f"{tag} 运行异常: {e}\n{tb_str}")
-            alert_key = f"{user_id}:generic_error:{type(e).__name__}"
-            if _should_alert(alert_key, 300):
-                # 推送错误信息时附带出错位置，便于远程排查
+            p.logger.error(f"{p.tag} 运行异常: {e}\n{tb_str}")
+            alert_key = f"{p.user_id}:generic_error:{type(e).__name__}"
+            if should_alert(alert_key, _ALERT_COOLDOWN_DEFAULT_SEC):
                 tb_lines = tb_str.strip().split('\n')
-                # 取最后几行（最相关的调用栈）
-                short_tb = '\n'.join(tb_lines[-4:]) if len(tb_lines) > 4 else tb_str
-                notify(
-                    f"⚠️ <b>{username} Bot 异常</b>\n"
-                    f"{str(e)[:200]}\n\n"
-                    f"<pre>{short_tb[:300]}</pre>"
+                short_tb = '\n'.join(tb_lines[-_ERROR_TRACEBACK_LINES:]) if len(tb_lines) > _ERROR_TRACEBACK_LINES else tb_str
+                p.notify(
+                    f"⚠️ <b>{p.username} Bot 异常</b>\n"
+                    f"{str(e)[:_ERROR_MSG_MAX_LEN]}\n\n"
+                    f"<pre>{short_tb[:_SHORT_TB_MAX_LEN]}</pre>"
                 )
-            stop_ev.wait(10)
+            p.stop_ev.wait(_GENERIC_ERROR_WAIT_SEC)
             continue
 
-        stop_ev.wait(INTERVAL)
+        p.stop_ev.wait(p.interval)
 
-    logger.info(f"{tag} Bot 已停止")
-    notify(f"🛑 <b>{username} 的 Bot 已停止</b>")
-    # V2.0: 清理 selector 注册
+    p.logger.info(f"{p.tag} Bot 已停止")
+    p.notify(f"🛑 <b>{p.username} 的 Bot 已停止</b>")
     try:
         from core.user_bot import manager as _mgr
-        _mgr.unregister_user_selector(user_id)
+        _mgr.unregister_user_selector(p.user_id)
     except Exception:
         pass

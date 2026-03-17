@@ -8,6 +8,7 @@
 
 | 版本 | 内容 |
 |------|------|
+| **V4.1** | 📰 OpenClaw 新闻同步集成：`/api/news-sync/*` 4 端点（config/ingest/run/status）、标准化同步脚本 `news_sync_runner.py`、Dashboard 新闻同步状态卡片（启用/权重/最近同步/判断 + 手动同步按钮）；选择器参数全面调优（降低 ADX/EMA 延迟、加快确认）；`news_weight` 默认 0.08 启用新闻辅助；余额获取增强（OKX 模拟盘 `totalEq`/`adjEq` 回退 + `fetch_accounts` 第三级回退）；异常通知附带 traceback 调用栈远程排查；余额为 0 自动告警；`startbot.sh` 优先 venv Python；`stopbot.sh` 增强进程匹配 |
 | **V4.0** | 🏛️ 机构级升级：多时间框架确认(MTF)、信号质量评分系统[0-100]、VWAP偏离度过滤、动态否决权阈值、OI连续性分析、成交量确认过滤器、Regime切换旧仓管理、三级回撤保护、Equity Curve Trading、动态风险预算(简化Kelly)、每日交易次数限制、RANGE止损优化 |
 | **V3.5** | 回测引擎大升级：AUTO 模式回测、追踪止损、时间止损、动态仓位、策略切换明细、per-strategy 统计；前端回测页高级功能面板 |
 | **V3.0** | 前端可视化 + 市场数据 API：Dashboard 市场情绪面板、5 个 `/api/market/*` 端点、WebSocket 推送 regime 详情 |
@@ -40,7 +41,8 @@
 │                     FastAPI 后端 (api/server.py)                    │
 │  端口 8080 | uvicorn 单 worker                                      │
 │  路由：/api/auth  /api/keys  /api/bot  /api/data                   │
-│        /api/notify  /api/user-config  /api/market  /api/health     │
+│        /api/notify  /api/user-config  /api/market                  │
+│        /api/news-sync  /api/health                                 │
 │  认证：JWT (Bearer Token) | 加密：Fernet AES-256                   │
 │  CORS：config.yaml → api.cors_origins                              │
 └────────┬──────────────────────────────────────────────────────────┘
@@ -123,7 +125,7 @@ QuantProject/
 ├── trading_data.db             # SQLite 主数据库（运行时自动创建）
 ├── trade_state.json            # ⚠️ 已弃用遗留文件，多用户版不使用
 ├── deploy.sh                   # 一键部署脚本（Ubuntu VPS）
-├── startbot.sh / stopbot.sh    # 手动启停脚本
+├── startbot.sh / stopbot.sh    # 手动启停脚本（优先 venv Python，增强进程匹配）
 │
 ├── api/                        # FastAPI 后端
 │   ├── server.py               # 应用入口 + WebSocket + SPA 托管
@@ -137,6 +139,7 @@ QuantProject/
 │       ├── data.py             # GET /api/data/trades, /balance, /strategies
 │       │                       # POST /backtest/run, GET /backtest/result, /history
 │       ├── market.py           # 🆕 V3.0: 市场数据 API（regime/funding/OI/sentiment/绩效）
+│       ├── news_sync.py        # 🆕 V4.1: OpenClaw 新闻同步 API（config/ingest/run/status）
 │       ├── notify.py           # POST /api/notify/telegram/save, /test, /clear
 │       └── user_config.py      # GET /api/user-config, POST /save, DELETE /reset
 │
@@ -189,7 +192,9 @@ QuantProject/
 ├── scripts/
 │   ├── backup_db.py            # 数据库备份（SQLite backup API + integrity_check）
 │   ├── fetch_news.py           # 新闻手动抓取 / 状态检查
-│   └── fix_database.py         # 数据库迁移修复
+│   ├── fix_database.py         # 数据库迁移修复
+│   ├── news_sync_runner.py     # 🆕 V4.1: OpenClaw 标准化新闻同步执行入口
+│   └── openclaw_news_sync.md   # 🆕 V4.1: OpenClaw 新闻同步任务模板
 │
 ├── frontend/                   # React 前端（Vite）
 │   └── src/
@@ -312,6 +317,7 @@ QuantProject/
 | `risk_state` | `user_id` | 风控持久化（连亏次数、日初余额、熔断标志） |
 | `backtest_history` | `id` (自增) | 回测历史（每用户最多 20 条，含完整结果 JSON） |
 | `strategy_performance` | `id` (自增) | 🆕 V2.5: 策略绩效追踪（每笔交易按策略记录 PnL） |
+| `news_summary` | `id` (自增) | 🆕 V4.1: 新闻情绪汇总（crypto/macro/combined_score + regime_hint） |
 
 ### 4.1 `bot_state.value` JSON 结构
 
@@ -342,7 +348,7 @@ QuantProject/
 - 由 `db_handler.py::init_db()` 的 `_MIGRATIONS` 列表管理
 - 每个迁移是 `(version, description, sql_list)` 三元组
 - 新增迁移只需在列表尾部追加，启动时自动执行
-- 当前版本：**v3**（V2.5 新增 `strategy_performance` 表）
+- 当前版本：**v4**（V4.1 重建 `trade_history` 表为新字段结构）
 
 ---
 
@@ -417,7 +423,16 @@ QuantProject/
 | GET | `/api/market/sentiment?symbol=` | 综合市场情绪面板（资金费率+OI+新闻+AI） |
 | GET | `/api/market/strategy-performance` | 各策略绩效统计（胜率/盈亏比/总PnL） |
 
-### 5.8 其他
+### 5.8 新闻同步（V4.1 OpenClaw）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/news-sync/config` | 获取新闻同步配置（是否启用、权重） |
+| POST | `/api/news-sync/ingest` | 接收新闻分析结果写入 `news_summary` 表 |
+| POST | `/api/news-sync/run` | 手动触发一次新闻同步（调用 `news_sync_runner.py`） |
+| GET | `/api/news-sync/status` | 最新同步状态（最近一条记录、距今分钟数、regime 判断） |
+
+### 5.9 其他
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -443,14 +458,14 @@ QuantProject/
 
 当 `config.yaml` 中 `strategy.name` 设为 `"AUTO"` 或用户在 Web 设置中选择 AUTO 时启用。
 
-> 🔑 **AUTO 模式无需外部 AI 服务**。核心决策完全基于数学计算（技术指标 + OKX 公开 API 链上数据），无需 VPS 以外的资源。AI 情绪分析为可选增强（当前默认关闭 `news_weight: 0.0`）。
+> 🔑 **AUTO 模式无需外部 AI 服务**。核心决策完全基于数学计算（技术指标 + OKX 公开 API 链上数据），无需 VPS 以外的资源。V4.1 起新闻面以低权重（0.08）默认启用，通过 OpenClaw 同步管道自动获取新闻评分。AI 情绪分析为可选增强。
 
 选择器流程（`strategy/selector.py::MarketRegimeSelector`）：
 
 1. **技术面分析**（权重 `selector.tech_weight`，默认 1.0）：
-   - ADX 趋势强度（>22 有趋势，<18 震荡，>40 强势突破）
-   - EMA 14/40/120 排列方向
-   - 布林带宽度（squeeze_pct < 3% 认为挤压）
+   - ADX 趋势强度（>20 有趋势，<16 震荡，>40 强势突破）
+   - EMA 12/36/96 排列方向
+   - 布林带宽度（squeeze_pct < 3.5% 认为挤压）
    - ATR 突变检测（波动率快速通道）
    - 🆕 V4.0: 成交量确认（量价配合加分/缩量趋势减分）
    - 🆕 V4.0: VWAP 偏离度（偏离 >2% 趋势信号打折，防追单）
@@ -463,9 +478,10 @@ QuantProject/
    - 将 1h K 线聚合为 4h K 线，计算 4h EMA(50) 方向
    - 4h 方向与 1h 一致 → 高置信度加成
    - 4h 方向与 1h 冲突 → 信号质量扣分
-4. **新闻 + AI 情绪分析**（权重 `selector.news_weight`，默认 **0.0 = 关闭**）：
+4. **新闻 + AI 情绪分析**（权重 `selector.news_weight`，默认 **0.08**）：
+   - 🆕 V4.1: OpenClaw 标准化新闻同步管道（定时抓取 → 评分 → 写入 DB）
    - 多源新闻抓取 + 关键词/AI 情绪评分
-   - 支持 OpenAI / DeepSeek 等兼容接口（可选，不影响核心功能）
+   - 支持 OpenAI / DeepSeek 等兼容接口（可选增强）
    - 动态权重：根据新闻新鲜度、数量、AI 可用性自动调整
 5. **信号质量评分**（🆕 V4.0，[0-100] 分）：
    - 5 维评分：技术面(30) + 多源一致性(25) + 链上(20) + MTF(15) + 波动率(10)
@@ -474,7 +490,7 @@ QuantProject/
    - ADX 模糊区间 + ATR 突变无方向 → 不交易
    - 策略切换过渡期前 3 根 K 线半仓试探
 7. **加权投票** → 判定 regime：`bull` / `bear` / `ranging` / `breakout` / `wait`
-8. **防抖保护**：动态 confirm_bars（置信度 >0.7 仅需 2 根，<0.4 需 4 根）
+8. **防抖保护**：动态 confirm_bars（置信度 >0.65 仅需 1 根，<0.35 需 3 根）
 9. **策略映射**：根据 `selector.strategy_bull/bear/ranging/breakout` 映射到具体策略
 10. 🆕 **Regime 切换旧仓管理**：BULL→BEAR 立即平多，切 WAIT 收紧止损 50%
 
@@ -626,11 +642,22 @@ strategy:
 
 selector:                       # AUTO 模式选择器参数
   tech_weight: 1.0              # 技术面权重
-  news_weight: 0.0              # 新闻面权重（AI 未接入时设 0）
+  news_weight: 0.08             # 🆕 V4.1: OpenClaw 新闻面辅助权重（低权重启用）
   confirm_bars: 3               # 防抖确认根数
   enable_market_extra: true     # 🆕 V2.0: 是否启用资金费率/OI 数据增强
   funding_weight: 0.15          # 🆕 V2.0: 资金费率权重
   oi_weight: 0.10               # 🆕 V2.0: OI 权重
+  # V4.1: 选择器参数调优（降低延迟、加快确认）
+  adx_bull_thresh: 20           # ADX > 此值认为有趋势（从 22 降至 20）
+  adx_range_thresh: 16          # ADX < 此值认为震荡（从 18 降至 16）
+  ema_short: 12                 # 快速 EMA（从 14 降至 12）
+  ema_mid: 36                   # 中速 EMA（从 40 降至 36）
+  ema_long: 96                  # 慢速 EMA（从 120 降至 96）
+  bb_squeeze_pct: 0.035         # 布林带挤压判定（从 0.03 放宽至 0.035）
+  confirm_bars_fast: 1          # 高置信度直接确认（从 2 降至 1）
+  confirm_bars_slow: 3          # 低置信度确认（从 4 降至 3）
+  confirm_fast_thresh: 0.65     # 快速确认阈值（从 0.7 降至 0.65）
+  confirm_slow_thresh: 0.35     # 慢速确认阈值（从 0.4 降至 0.35）
   # V4.0: 多时间框架确认 (MTF)
   mtf_enable: true              # 是否启用 4h 级别方向过滤
   mtf_ema_period: 50            # 4h 级别 EMA 周期
@@ -666,6 +693,11 @@ risk_v25:                       # 🆕 V2.5+V4.0: 高级风控参数
   equity_ema_period: 10         # 资金曲线 EMA 周期
   equity_below_ema_scale: 0.6   # 低于 EMA 时仓位缩放
   max_daily_trades: 8           # 每日最多开仓次数
+
+news_sync:                      # 🆕 V4.1: OpenClaw 新闻同步配置
+  enable: true                  # 是否启用新闻同步 API
+  lookback_hours: 12            # 新闻回溯时间窗口
+  interval_hours: 4             # 建议同步间隔
 
 api:
   host: "0.0.0.0"
@@ -733,6 +765,8 @@ sqlite3 trading_data.db "SELECT * FROM schema_version"  # 查看版本
 # 新闻系统
 python3 scripts/fetch_news.py --status     # 查看新闻抓取状态
 python3 scripts/fetch_news.py --force      # 强制立即抓取
+python3 scripts/news_sync_runner.py        # 🆕 V4.1: 手动执行 OpenClaw 新闻同步
+curl http://127.0.0.1:8080/api/news-sync/status  # 查看最新同步状态
 
 # 定时器状态
 systemctl list-timers | grep quantbot      # 查看所有定时器
@@ -786,6 +820,7 @@ cd frontend && npm install && npm run dev
 | 风控熔断？ | 控制台显示「已熔断」→ 点「恢复熔断」 |
 | 策略返回 HOLD？ | 查看 `tradelog/<username>.log` 中策略信号 |
 | 合约账户余额？ | 设置页 → 实时余额，确保 swap 账户有 USDT |
+| 余额获取为 0？ | 🆕 V4.1: Bot 连续 5 轮余额为 0 时会推送 Telegram 告警。常见原因：模拟盘/实盘 Key 不匹配、合约账户无 USDT、ccxt 在模拟盘下 `fetch_balance()` 抛出 TypeError（已有 `totalEq` 回退） |
 | 杠杆设置失败？ | 日志中搜 "设置杠杆失败"，OKX 可能有持仓时不允许改杠杆 |
 | 品种是否带 `:USDT`？ | 永续合约格式必须是 `BTC/USDT:USDT`（非 `BTC/USDT`） |
 
@@ -974,7 +1009,7 @@ runner.py 内置网络错误分类（`_classify_error`）：
 | 页面 | 路由 | 功能 |
 |------|------|------|
 | AuthPage | `/login` | 登录/注册切换 |
-| Dashboard | `/` | Bot 启停、实时 WebSocket 状态、持仓卡片、浮动盈亏、熔断恢复；🆕 V3.0: 市场状态面板（资金费率+OI+新闻情绪+综合信号）、Regime 状态标签 |
+| Dashboard | `/` | Bot 启停、实时 WebSocket 状态、持仓卡片、浮动盈亏、熔断恢复；🆕 V3.0: 市场状态面板（资金费率+OI+新闻情绪+综合信号）、Regime 状态标签；🆕 V4.1: 新闻同步状态卡片（启用/权重/最近同步/判断 + 手动同步按钮） |
 | TradesPage | `/trades` | 历史交易记录分页、胜率/总PnL统计 |
 | BalancePage | `/balance` | 资产曲线图（Recharts）+ OKX 实时余额 |
 | BacktestPage | `/backtest` | 策略/品种/参数选择 → 触发回测 → K线图 + 权益曲线 + 交易列表；🆕 V3.5: AUTO 模式、高级功能开关、策略切换明细表、各策略绩效对比 |
@@ -1012,9 +1047,9 @@ runner.py 内置网络错误分类（`_classify_error`）：
 - OKX 公开 API：资金费率、OI（持仓量）— 免费且无需额外 API Key
 - 多时间框架聚合：1h→4h K 线聚合后计算 EMA 方向
 
-AI 情绪分析（`ai_client.py`）是**可选增强模块**，默认关闭（`news_weight: 0.0`、`ai.api_key: ""`）。如需启用：
-1. 在 `config.yaml` 中填写 `ai.api_key`（支持 OpenAI / DeepSeek 等）
-2. 将 `selector.news_weight` 改为 0.1~0.3
+AI 情绪分析（`ai_client.py`）是**可选增强模块**。V4.1 起默认以低权重启用新闻面（`news_weight: 0.08`），通过 OpenClaw 标准化同步管道获取新闻评分。如需调整：
+1. 修改 `config.yaml` 中 `selector.news_weight`（0 = 关闭，0.1~0.3 = 增强）
+2. 如使用 AI 情绪分析，在 `config.yaml` 中填写 `ai.api_key`（支持 OpenAI / DeepSeek 等）
 3. 重启 Bot 即可
 
 ### Q2: AUTO 模式需要什么运行环境？

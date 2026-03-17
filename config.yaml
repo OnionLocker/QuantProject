@@ -21,118 +21,122 @@ strategy:
 
 # ── 自动策略选择器配置（strategy.name = "AUTO" 时生效）────────────────────────
 selector:
-  # 技术面参数
+  # 技术面参数 (V5.0: BTC适配 - 降低趋势门槛)
   adx_period:       14
-  adx_bull_thresh:  20         # BTC 1h 放宽趋势识别，减少长期卡在 WAIT/HOLD
-  adx_range_thresh: 16         # 震荡阈值略放宽，避免过早判成 range
-  ema_short:        12         # 快速 EMA 更灵敏，适合 BTC 1h 节奏
-  ema_mid:          36         # 中速 EMA 略收紧，提升切换反应速度
-  ema_long:         96         # 慢速 EMA 从 120 降到 96，降低趋势确认滞后
+  adx_bull_thresh:  18         # V5.0: 从20降到18，BTC ADX普遍偏低，18即有趋势迹象
+  adx_range_thresh: 13         # V5.0: 从16降到13，更少行情被判为震荡
+  ema_short:        10         # V5.0: 从12降到10，更灵敏
+  ema_mid:          30         # V5.0: 从36降到30，提升反应速度
+  ema_long:         80         # V5.0: 从96降到80，减少趋势确认滞后
   bb_period:        20
-  bb_squeeze_pct:   0.035      # 稍放宽挤压判定，更容易识别突破前环境
+  bb_squeeze_pct:   0.04       # V5.0: 从0.035提到0.04，更容易识别挤压
 
-  # 权重配置
-  tech_weight:      1.0        # 技术面权重（AI情绪分析未接入时建议设为1.0）
-  news_weight:      0.08       # OpenClaw 新闻面辅助权重（BTC 1h 建议低权重启用）
-  news_max_age_min: 120        # 新闻数据超过此分钟数则忽略
+  # 权重配置 (V5.0: 技术面权重最大化)
+  tech_weight:      1.0
+  news_weight:      0.05       # V5.0: 从0.08降到0.05，减少噪声干扰
+  news_max_age_min: 120
 
-  # 防抖：连续 N 轮确认才切换策略（避免频繁抖动）
-  confirm_bars:     3             # 默认确认根数（兼容旧配置）
-  # V3.0: 动态确认根数（根据置信度自适应）
-  confirm_bars_fast:    1         # BTC 1h 提高反应速度，高置信度直接确认
-  confirm_bars_slow:    3         # 低置信度也别拖太久
-  confirm_fast_thresh:  0.65      # 更容易进入快速确认
-  confirm_slow_thresh:  0.35      # 放宽慢速阈值
+  # 防抖 (V5.0: 进一步加速确认)
+  confirm_bars:     2
+  confirm_bars_fast:    1       # 高置信度直接确认
+  confirm_bars_slow:    2       # V5.0: 从3降到2，低置信度也快速响应
+  confirm_fast_thresh:  0.55    # V5.0: 从0.65降到0.55，更容易快速确认
+  confirm_slow_thresh:  0.30    # V5.0: 从0.35降到0.30
 
-  # 各 regime 对应的策略名（必须在注册表中存在）
+  # 各 regime 对应的策略名
   strategy_bull:    "BULL"
   strategy_bear:    "BEAR"
   strategy_ranging: "RANGE"
-  strategy_breakout: "BIG_CANDLE"   # ADX>40 强势突破行情使用大阳线策略
+  strategy_breakout: "BIG_CANDLE"
 
-  # V2.0: 资金费率 + OI 链上数据
-  enable_market_extra: true          # 是否启用资金费率/OI 数据增强
-  funding_weight:     0.10           # 降低链上辅助权重，减少对纯技术信号的压制
-  oi_weight:          0.08           # OI 保留但降权
-  funding_extreme:    0.0006         # 稍放宽极端费率阈值
-  oi_spike_pct:       0.12           # OI 变化幅度阈值放宽
-  dynamic_news_weight: true          # 启用动态新闻权重（根据数据质量自动调整）
+  # V2.0: 资金费率 + OI (V5.0: 降低链上数据的压制作用)
+  enable_market_extra: true
+  funding_weight:     0.06     # V5.0: 从0.10降到0.06
+  oi_weight:          0.05     # V5.0: 从0.08降到0.05
+  funding_extreme:    0.0008   # V5.0: 从0.0006放宽到0.0008
+  oi_spike_pct:       0.15     # V5.0: 从0.12放宽到0.15
+  dynamic_news_weight: true
 
-  # V3.0: 资金费率否决权（极端费率时强制 WAIT，保护性机制）
-  funding_veto_enable: true           # 保留保护，但降低触发概率
-  funding_veto_mult:   2.5            # 更极端才否决，减少误伤趋势行情
-  funding_veto_contra: true           # 只在费率与技术面方向冲突时否决（更精准）
+  # V3.0: 资金费率否决权 (V5.0: 收紧否决触发)
+  funding_veto_enable: true
+  funding_veto_mult:   3.0     # V5.0: 从2.5提高到3.0，更极端才否决
+  funding_veto_contra: true
 
-  # V4.0: 多时间框架确认（MTF - 机构级 top-down analysis）
-  mtf_enable:        true             # 保留 4h 过滤，但减轻影响
-  mtf_ema_period:    34               # 4h EMA 更灵敏，适合 BTC 1h 联动
-  mtf_weight:        0.10             # 降低 MTF 压制，避免 1h 信号长期被盖掉
+  # V4.0: 多时间框架确认 (V5.0: 降低MTF压制)
+  mtf_enable:        true
+  mtf_ema_period:    30        # V5.0: 从34降到30
+  mtf_weight:        0.06      # V5.0: 从0.10降到0.06，减少高时间框架压制
 
-  # V4.0: VWAP 偏离度（均值回归压力评估）
-  vwap_period:       20               # VWAP 计算周期
-  vwap_deviation_pct: 0.02            # 偏离 >2% 视为极端，趋势信号打折
+  # V4.0: VWAP 偏离度 (V5.0: 放宽均值回归压力)
+  vwap_period:       20
+  vwap_deviation_pct: 0.03     # V5.0: 从0.02放宽到0.03
 
-  # V4.0: 动态否决权阈值（基于近期费率分布自适应）
-  dynamic_veto_enable:  true          # 是否用动态百分位替代固定阈值
-  dynamic_veto_pctile:  92            # 提高百分位，减少动态否决过于频繁
+  # V4.0: 动态否决权阈值
+  dynamic_veto_enable:  true
+  dynamic_veto_pctile:  95     # V5.0: 从92提高到95，更少触发否决
 
-  # V4.0: 信号质量评分阈值
-  signal_quality_full:  55            # BTC 1h 降低满仓门槛，减少长期 HOLD
-  signal_quality_half:  35            # 放宽半仓门槛，让边缘信号也能试仓
+  # V4.0: 信号质量评分阈值 (V5.0: 大幅降低门槛)
+  signal_quality_full:  40     # V5.0: 从55降到40
+  signal_quality_half:  25     # V5.0: 从35降到25
 
-  # 各策略的参数覆盖（BTC/USDT 1h 优化后的默认参数）
-  # 如果不填则使用策略代码里的默认值，两者现在已经同步
+  # 各策略的参数覆盖 (V5.0: BTC 1h 盈利导向优化)
   strategy_params:
     BULL:
-      ema_fast:      8          # BTC 1h 保持灵敏
+      ema_fast:      8
       ema_slow:      21
-      ema_trend:     34         # 趋势线更灵敏，减少趋势确认滞后
-      adx_threshold: 20         # 放宽趋势触发
-      atr_sl_mult:   1.1        # 止损略紧，提高风险收益效率
-      rr1:           1.4        # 更容易止盈落袋
-      rsi_os:        42         # 回调买入条件放宽，避免一直等超深回踩
-      cooldown:      3
+      ema_trend:     30         # V5.0: 从34降到30
+      adx_threshold: 18         # V5.0: 从20降到18
+      atr_sl_mult:   1.0        # V5.0: 从1.1降到1.0，止损更紧
+      rr1:           1.5        # V5.0: 从1.4提到1.5，风险收益比更优
+      rsi_os:        45         # V5.0: 从42放宽到45，更容易触发B2回调买点
+      cooldown:      2          # V5.0: 从3降到2
     BEAR:
       ema_fast:      8
       ema_slow:      21
-      ema_trend:     34
-      adx_threshold: 20
-      atr_sl_mult:   1.1
-      rr1:           1.4
-      rsi_ob:        58         # 做空回落条件放宽
-      cooldown:      3
+      ema_trend:     30
+      adx_threshold: 18
+      atr_sl_mult:   1.0
+      rr1:           1.5
+      rsi_ob:        55         # V5.0: 从58降到55，更容易触发S2反弹空点
+      cooldown:      2
     RANGE:
       bb_period:     20
       bb_std:        2.0
-      squeeze_pct:   0.045            # 更容易识别收缩区间
-      squeeze_lookback: 12            # 稍放宽收缩回看窗口
-      range_lookback:   18            # 缩短区间回看，提高响应速度
-      adx_rise_thresh:  1.5           # 降低趋势启动门槛
-      vol_mult:      1.15             # 放宽突破量能要求
-      body_ratio_min: 50.0            # 放宽实体占比
-      atr_sl_mult:   1.0
-      rr1:           1.4
-      rr2:           2.6
-      cooldown:      4
+      squeeze_pct:   0.05       # V5.0: 从0.045放宽到0.05
+      squeeze_lookback: 10      # V5.0: 从12降到10
+      range_lookback:   15      # V5.0: 从18降到15
+      adx_rise_thresh:  1.0     # V5.0: 从1.5降到1.0
+      vol_mult:      1.05       # V5.0: 从1.15降到1.05
+      body_ratio_min: 45.0      # V5.0: 从50降到45
+      atr_sl_mult:   0.8        # V5.0: 从1.0降到0.8
+      rr1:           1.5
+      rr2:           2.8
+      cooldown:      3          # V5.0: 从4降到3
     BIG_CANDLE:
-      body_pct:      0.9        # BTC 1h 更容易捕获有效突破K
-      vol_mult:      1.15       # 量能要求进一步放宽
-      body_ratio_min: 50.0      # 实体占比放宽
+      body_pct:      0.8        # V5.0: 从0.9降到0.8
+      vol_mult:      1.1        # V5.0: 从1.15降到1.1
+      body_ratio_min: 45.0      # V5.0: 从50降到45
       sl_mode:       1
-      atr_sl_mult:   1.1
-      rr1:           1.4
-      breakout_lookback: 12     # 缩短突破回看窗口
-      high_pos_lookback: 36     # 缩短高位过滤窗口
-      cooldown:      3
+      atr_sl_mult:   1.0        # V5.0: 从1.1降到1.0
+      rr1:           1.5        # V5.0: 从1.4提到1.5
+      breakout_lookback: 10     # V5.0: 从12降到10
+      high_pos_lookback: 36
+      bb_squeeze_pct: 3.5       # V5.0: 从3.0放宽到3.5
+      cooldown:      2          # V5.0: 从3降到2
       enable_short:  1
 
 api:
   host: "0.0.0.0"
   port: 8080
   enable: true
-  # CORS 允许的源列表，生产环境请替换为实际域名
+  # CORS 允许的源列表
+  # ⚠️ 生产环境务必替换为实际域名！["*"] 仅用于开发调试
   # 例如: ["https://your-domain.com", "https://admin.your-domain.com"]
   cors_origins: ["*"]
+  # 速率限制（每 IP 每分钟请求数）
+  rate_limit:
+    general_rpm: 120                   # 普通 API 端点
+    auth_rpm: 10                       # 登录/注册端点（防暴力破解）
 
 # ── OpenClaw 新闻同步（外部新闻面输入）──────────────────────────────────────
 # 当 strategy.selector.news_weight > 0 时建议启用。
@@ -147,10 +151,10 @@ news_sync:
   symbols: ["BTC", "Bitcoin", "ETF", "Fed", "crypto"]
 
 # ── V2.0: AI 情绪分析客户端 ─────────────────────────────────────────────────
-# 支持 OpenAI / DeepSeek / 零一万物等 OpenAI 兼容接口
-# 也可通过环境变量 AI_API_KEY / AI_BASE_URL / AI_MODEL 配置
+# ⚠️ API Key 已移到 .env 环境变量（AI_API_KEY），请勿在此文件中填写密钥！
+# 环境变量配置：AI_API_KEY / AI_BASE_URL / AI_MODEL
 ai:
-  api_key: ""                        # 填入 API Key 后自动启用 AI 分析
+  # api_key 已移到 .env → AI_API_KEY（安全加固）
   base_url: "https://api.openai.com/v1"   # 或 https://api.deepseek.com/v1
   model: "gpt-4o-mini"               # 推荐：gpt-4o-mini (便宜) 或 deepseek-chat
 

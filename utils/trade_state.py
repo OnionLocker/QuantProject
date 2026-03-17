@@ -8,9 +8,12 @@ utils/trade_state.py - 持仓状态管理（SQLite 版）
 多用户版状态管理在 core/user_bot/runner.py 中内联实现，不使用本模块。
 避免循环导入：本模块直接使用 sqlite3 + DB_PATH，不导入 db_handler 中的函数。
 """
-import sqlite3
+from __future__ import annotations
+
 import json
 import os
+import sqlite3
+from typing import Any, Dict, Optional
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
@@ -22,7 +25,7 @@ DB_PATH = os.path.join(project_root, "trading_data.db")
 _LEGACY_JSON = os.path.join(project_root, 'trade_state.json')
 
 
-def _init_state_table():
+def _init_state_table() -> None:
     """在 SQLite 中建立 bot_state 表（若不存在）"""
     conn = sqlite3.connect(DB_PATH)
     conn.execute('''
@@ -52,7 +55,7 @@ def _migrate_legacy():
 _initialized = False
 
 
-def _ensure_initialized():
+def _ensure_initialized() -> None:
     """延迟初始化：首次调用 load/save 时才建表和迁移，避免 import 时副作用。"""
     global _initialized
     if _initialized:
@@ -62,7 +65,7 @@ def _ensure_initialized():
     _initialized = True
 
 
-def get_empty_state() -> dict:
+def get_empty_state() -> Dict[str, Any]:
     """返回标准化的空状态字典"""
     return {
         "position_side": None,
@@ -85,7 +88,7 @@ def get_empty_state() -> dict:
     }
 
 
-def load_state() -> dict:
+def load_state() -> Dict[str, Any]:
     """从 SQLite 读取持仓状态；若无记录则返回空状态"""
     _ensure_initialized()
     try:
@@ -121,6 +124,6 @@ def save_state(state: dict):
         print(f"❌ 保存持仓状态失败: {e}")
 
 
-def clear_state():
+def clear_state() -> None:
     """清空持仓状态（平仓后调用）"""
     save_state(get_empty_state())

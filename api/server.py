@@ -7,21 +7,28 @@ api/server.py - FastAPI 应用入口（多用户版）
 前端静态文件部署：
   将 React build 产物放入 frontend/dist/，FastAPI 自动托管。
 """
+from __future__ import annotations
+
+import logging
 import os
 import sys
 import asyncio
 import json
 import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
+from typing import Any, Dict, Optional
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
+current_dir: str = os.path.dirname(os.path.abspath(__file__))
+project_root: str = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from datetime import datetime
 
 from api.routes.auth        import router as auth_router
@@ -37,15 +44,17 @@ from core.user_bot import manager as bot_mgr
 from execution.db_handler import init_db
 from utils.config_loader import get_config
 
+_server_logger: logging.Logger = logging.getLogger("QuantBot.server")
+
 
 # ── 价格缓存（多 WebSocket 连接共享，避免重复拉取交易所价格）───────────────────
-_price_cache: dict = {}   # symbol -> {"price": float, "ts": float}
-_PRICE_CACHE_TTL = 3.0    # 缓存有效期（秒）
+_price_cache: Dict[str, Dict[str, Any]] = {}   # symbol -> {"price": float, "ts": float}
+_PRICE_CACHE_TTL: float = 3.0    # 缓存有效期（秒）
 
 
-def _get_cached_price(ex, symbol: str):
+def _get_cached_price(ex: Any, symbol: str) -> Optional[float]:
     """从缓存获取价格，超时才真正调用交易所 API。"""
-    now = time.time()
+    now: float = time.time()
     cached = _price_cache.get(symbol)
     if cached and (now - cached["ts"]) < _PRICE_CACHE_TTL:
         return cached["price"]
@@ -59,28 +68,157 @@ def _get_cached_price(ex, symbol: str):
         return cached["price"] if cached else None
 
 
+# ── 安全：JWT 密钥启动检查 ────────────────────────────────────────────────────
+def _check_jwt_secret() -> None:
+    """检查 JWT_SECRET 是否为默认值，生产环境下必须修改。"""
+    from api.auth.jwt_handler import SECRET_KEY
+    if SECRET_KEY == "change-me-in-production-please":
+        _server_logger.warning(
+            "⚠️  JWT_SECRET 使用默认值，存在安全风险！"
+            "请在 .env 中设置强随机密钥：JWT_SECRET=$(python3 -c \"import secrets; print(secrets.token_hex(32))\")"
+        )
+
+
+# ── 速率限制中间件（基于 IP 的简易令牌桶）─────────────────────────────────────
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    简易速率限制：
+    - 普通 API：每 IP 每分钟 120 次
+    - 认证端点（登录/注册）：每 IP 每分钟 10 次（防暴力破解）
+    """
+
+    def __init__(self, app: Any, general_rpm: int = 120, auth_rpm: int = 10) -> None:
+        super().__init__(app)
+        self._general_rpm: int = general_rpm
+        self._auth_rpm: int = auth_rpm
+        # IP -> [(timestamp, ...)]
+        self._general_hits: Dict[str, list] = defaultdict(list)
+        self._auth_hits: Dict[str, list] = defaultdict(list)
+
+    def _clean_old(self, hits: list, window: float = 60.0) -> list:
+        """清理超出时间窗口的记录。"""
+        now = time.time()
+        return [t for t in hits if now - t < window]
+
+    async def dispatch(self, request: Request, call_next: Any) -> Any:
+        # 从反向代理头获取真实 IP（nginx 配置了 X-Real-IP）
+        client_ip: str = (
+            request.headers.get("X-Real-IP")
+            or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            or (request.client.host if request.client else "unknown")
+        )
+        path: str = request.url.path
+
+        # 认证端点特殊限流
+        is_auth_path: bool = path in ("/api/auth/login", "/api/auth/register")
+
+        if is_auth_path:
+            self._auth_hits[client_ip] = self._clean_old(self._auth_hits[client_ip])
+            if len(self._auth_hits[client_ip]) >= self._auth_rpm:
+                _server_logger.warning(f"🚫 速率限制触发 [AUTH] IP={client_ip} path={path}")
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "请求过于频繁，请稍后再试"},
+                    headers={"Retry-After": "60"},
+                )
+            self._auth_hits[client_ip].append(time.time())
+
+        # 通用 API 限流（跳过静态文件和健康检查）
+        if path.startswith("/api/"):
+            self._general_hits[client_ip] = self._clean_old(self._general_hits[client_ip])
+            if len(self._general_hits[client_ip]) >= self._general_rpm:
+                _server_logger.warning(f"🚫 速率限制触发 [GENERAL] IP={client_ip} path={path}")
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "请求过于频繁，请稍后再试"},
+                    headers={"Retry-After": "60"},
+                )
+            self._general_hits[client_ip].append(time.time())
+
+        response = await call_next(request)
+        return response
+
+
+# ── 安全响应头中间件 ──────────────────────────────────────────────────────────
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """为所有响应添加安全头。"""
+
+    async def dispatch(self, request: Request, call_next: Any) -> Any:
+        response = await call_next(request)
+        # 防止 MIME 类型嗅探
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        # 防止点击劫持
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        # XSS 保护
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        # 控制 referrer 信息泄漏
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # 禁止浏览器缓存 API 响应中的敏感数据
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
 # ── Lifespan（替代已弃用的 @app.on_event）─────────────────────────────────────
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """服务启动时初始化数据库，关闭时可做清理。"""
+async def lifespan(app: FastAPI) -> Any:
+    """服务启动时初始化数据库 + 安全检查，关闭时可做清理。"""
     init_db()
+    _check_jwt_secret()
     yield
     # shutdown 清理（目前无需特殊操作）
 
 
-app = FastAPI(title="QuantBot", version="3.0-multiuser", lifespan=lifespan)
+app = FastAPI(
+    title="QuantBot",
+    version="4.1-multiuser",
+    lifespan=lifespan,
+    # 生产环境禁用交互式文档（防止未授权访问）
+    docs_url="/api/docs" if os.getenv("QUANTBOT_ENV", "production") == "development" else None,
+    redoc_url=None,
+)
 
 
-# ── CORS：从 config.yaml 读取允许的源，默认开发模式全放 ──────────────────────
-_api_cfg = get_config().get("api", {})
-_cors_origins = _api_cfg.get("cors_origins", ["*"])
+# ── CORS：从 config.yaml 读取，生产环境严格限制 ──────────────────────────────
+_api_cfg: Dict[str, Any] = get_config().get("api", {})
+_cors_origins: list = _api_cfg.get("cors_origins", ["*"])
+
+# 安全警告：检测到通配符
+if "*" in _cors_origins:
+    _server_logger.warning(
+        "⚠️  CORS 配置为 allow_origins=['*']，存在安全风险！"
+        "生产环境请在 config.yaml → api.cors_origins 中指定实际域名，"
+        "例如: [\"https://your-domain.com\"]"
+    )
+
+# 根据是否有通配符决定 credentials 策略
+# 注意：allow_credentials=True 和 allow_origins=["*"] 不能同时使用
+_allow_credentials: bool = "*" not in _cors_origins
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=_allow_credentials,
+    # 仅允许实际使用的 HTTP 方法
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    # 仅允许必要的请求头
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
+    # 预检请求缓存时间（秒），减少 OPTIONS 请求
+    max_age=600,
 )
+
+# ── 安全中间件（注意：中间件按添加的反序执行）─────────────────────────────────
+# 速率限制
+_rate_cfg: Dict[str, Any] = _api_cfg.get("rate_limit", {})
+app.add_middleware(
+    RateLimitMiddleware,
+    general_rpm=_rate_cfg.get("general_rpm", 120),
+    auth_rpm=_rate_cfg.get("auth_rpm", 10),
+)
+
+# 安全响应头
+app.add_middleware(SecurityHeadersMiddleware)
 
 # ── API 路由 ─────────────────────────────────────────────────────────────────
 app.include_router(auth_router)

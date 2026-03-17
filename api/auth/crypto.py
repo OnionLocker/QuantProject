@@ -60,4 +60,5 @@ if __name__ == "__main__":
     else:
         with open(env_path, "a") as f:
             f.write(f"\nENCRYPT_KEY={key}\n")
-        print(f"✅ ENCRYPT_KEY 已写入 .env：{key}")
+        # 安全：仅显示密钥前 8 位，避免终端历史泄露完整密钥
+        print(f"✅ ENCRYPT_KEY 已写入 .env（前缀：{key[:8]}...）")

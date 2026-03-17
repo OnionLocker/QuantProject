@@ -279,41 +279,37 @@ class RangeOscillatorStrategy(BaseStrategy):
 
             sl_pad = ATR[j] * self.atr_sl_mult
 
-            # ── 核心条件：最近必须存在收缩（蓄力确认）───────────────
-            had_squeeze = (not np.isnan(REC_SQ[j])) and REC_SQ[j] >= 3
+            # ── 核心条件：最近必须存在收缩 (V5.0: 从3降到2) ─────────
+            had_squeeze = (not np.isnan(REC_SQ[j])) and REC_SQ[j] >= 2
 
-            # V4.0: 收缩持续时间加权
-            # 收缩 >= 8 根 K线 = 高质量蓄力，可降低量能门槛
+            # V5.0: 收缩持续时间加权 (从8降到6)
             squeeze_dur = SQ_DUR[j] if not np.isnan(SQ_DUR[j]) else 0
-            long_squeeze = squeeze_dur >= 8  # 长时间收缩
+            long_squeeze = squeeze_dur >= 6
 
-            # ── ADX 从低位上升（趋势启动信号）─────────────────────
+            # ── ADX 从低位上升 (V5.0: 回看从5降到3) ──────────────
             adx_rising = False
-            if j >= 5:
-                adx_base = np.nanmin(ADX[j-5:j])
+            if j >= 3:
+                adx_base = np.nanmin(ADX[j-3:j])
                 adx_rising = (ADX[j] - adx_base) > self.adx_rise_thresh
 
             # ── 成交量放大 ────────────────────────────────────────
-            vol_ok = True  # 默认通过（如果没有 volume 数据）
+            vol_ok = True
             if has_vol and not np.isnan(VOL_MA[j]) and VOL_MA[j] > 0:
-                # V4.0: 长时间收缩后量能门槛降低（蓄力越久突破越可靠）
-                vol_mult_eff = self.vol_mult * 0.85 if long_squeeze else self.vol_mult
+                vol_mult_eff = self.vol_mult * 0.8 if long_squeeze else self.vol_mult
                 vol_ok = VOL[j] > VOL_MA[j] * vol_mult_eff
 
-            # ── 实体占比过滤 ──────────────────────────────────────
+            # ── 实体占比 ──────────────────────────────────────
             body_ok = BODY_PCT[j] >= self.body_ratio_min
 
             # ═══════════════════════════════════════════════════════
-            # R1: 收缩后布林带突破向上
-            # V4.0: 止损改为突破K线最低价 + 0.5×ATR（更紧凑）
+            # R1: 收缩后布林带突破向上 (V5.0: body_ok可选)
             # ═══════════════════════════════════════════════════════
             if (had_squeeze and C[j] > BB_U[j] and C[j] > O[j]
-                    and body_ok and vol_ok and RSI[j] < 75):
+                    and vol_ok and RSI[j] < 78):
                 entry = O[i]
-                # V4.0: 止损 = 突破K线最低价 - 0.5×ATR（而非区间下沿）
                 sl = L[j] - ATR[j] * 0.5
                 risk = entry - sl
-                if risk > entry * 0.002:
+                if risk > entry * 0.001:
                     actions[i]  = 'BUY'
                     sig_sl[i]   = sl
                     sig_tp1[i]  = entry + risk * self.rr1
@@ -323,16 +319,16 @@ class RangeOscillatorStrategy(BaseStrategy):
                     continue
 
             # ═══════════════════════════════════════════════════════
-            # R2: 区间高点突破 + ADX 启动
+            # R2: 区间高点突破 (V5.0: adx_rising或vol_ok, RSI放宽)
             # ═══════════════════════════════════════════════════════
             if (j >= self.range_lookback and
                     C[j] > RNG_H[j-1] and C[j] > O[j]
-                    and adx_rising and body_ok
-                    and 45 < RSI[j] < 72):
+                    and (adx_rising or vol_ok)
+                    and 40 < RSI[j] < 78):
                 entry = O[i]
-                sl = RNG_L[j] - sl_pad  # 止损放在区间低点
+                sl = RNG_L[j] - sl_pad
                 risk = entry - sl
-                if risk > entry * 0.002:
+                if risk > entry * 0.001:
                     actions[i]  = 'BUY'
                     sig_sl[i]   = sl
                     sig_tp1[i]  = entry + risk * self.rr1
@@ -342,16 +338,14 @@ class RangeOscillatorStrategy(BaseStrategy):
                     continue
 
             # ═══════════════════════════════════════════════════════
-            # R3: 收缩后布林带突破向下
-            # V4.0: 止损改为突破K线最高价 + 0.5×ATR（更紧凑）
+            # R3: 收缩后布林带突破向下 (V5.0: body_ok可选)
             # ═══════════════════════════════════════════════════════
             if (had_squeeze and C[j] < BB_L[j] and C[j] < O[j]
-                    and body_ok and vol_ok and RSI[j] > 25):
+                    and vol_ok and RSI[j] > 22):
                 entry = O[i]
-                # V4.0: 止损 = 突破K线最高价 + 0.5×ATR
                 sl = H[j] + ATR[j] * 0.5
                 risk = sl - entry
-                if risk > entry * 0.002:
+                if risk > entry * 0.001:
                     actions[i]  = 'SELL'
                     sig_sl[i]   = sl
                     sig_tp1[i]  = entry - risk * self.rr1
@@ -361,16 +355,16 @@ class RangeOscillatorStrategy(BaseStrategy):
                     continue
 
             # ═══════════════════════════════════════════════════════
-            # R4: 区间低点突破 + ADX 启动
+            # R4: 区间低点突破 (V5.0: RSI放宽)
             # ═══════════════════════════════════════════════════════
             if (j >= self.range_lookback and
                     C[j] < RNG_L[j-1] and C[j] < O[j]
-                    and adx_rising and body_ok
-                    and 28 < RSI[j] < 55):
+                    and (adx_rising or vol_ok)
+                    and 22 < RSI[j] < 60):
                 entry = O[i]
-                sl = RNG_H[j] + sl_pad  # 止损放在区间高点
+                sl = RNG_H[j] + sl_pad
                 risk = sl - entry
-                if risk > entry * 0.002:
+                if risk > entry * 0.001:
                     actions[i]  = 'SELL'
                     sig_sl[i]   = sl
                     sig_tp1[i]  = entry - risk * self.rr1
@@ -429,17 +423,17 @@ class RangeOscillatorStrategy(BaseStrategy):
 
         sl_pad = ATR[j] * self.atr_sl_mult
 
-        # 收缩确认
-        had_squeeze = (not np.isnan(REC_SQ[j])) and REC_SQ[j] >= 3
+        # 收缩确认 (V5.0: 从3根降到2根)
+        had_squeeze = (not np.isnan(REC_SQ[j])) and REC_SQ[j] >= 2
 
         # V4.0: 收缩持续时间加权
         squeeze_dur = SQ_DUR[j] if not np.isnan(SQ_DUR[j]) else 0
-        long_squeeze = squeeze_dur >= 8
+        long_squeeze = squeeze_dur >= 6  # V5.0: 从8降到6
 
-        # ADX 启动
+        # ADX 启动 (V5.0: 回看从5降到3，更快检测趋势启动)
         adx_rising = False
-        if j >= 5:
-            adx_base = np.nanmin(ADX[j-5:j])
+        if j >= 3:
+            adx_base = np.nanmin(ADX[j-3:j])
             adx_rising = (ADX[j] - adx_base) > self.adx_rise_thresh
 
         # 成交量
@@ -449,18 +443,17 @@ class RangeOscillatorStrategy(BaseStrategy):
             vol_ma = df['vol_ma'].values
             vol = df['volume'].values
             if not np.isnan(vol_ma[j]) and vol_ma[j] > 0:
-                vol_mult_eff = self.vol_mult * 0.85 if long_squeeze else self.vol_mult
+                vol_mult_eff = self.vol_mult * 0.8 if long_squeeze else self.vol_mult
                 vol_ok = vol[j] > vol_ma[j] * vol_mult_eff
 
         body_ok = BODY_PCT[j] >= self.body_ratio_min
 
-        # ── R1: 收缩突破做多 ─────────────────────────────────────
-        # V4.0: 止损 = 突破K线最低价 - 0.5×ATR
+        # ── R1: 收缩突破做多 (V5.0: body_ok 变为可选加分，不作为必要条件) ──
         if (had_squeeze and C[j] > BB_U[j] and C[j] > O[j]
-                and body_ok and vol_ok and RSI[j] < 75):
+                and vol_ok and RSI[j] < 78):
             sl = L[j] - ATR[j] * 0.5
             risk = entry - sl
-            if risk > entry * 0.002:
+            if risk > entry * 0.001:
                 sig.update({"action": "BUY", "entry": entry, "sl": sl,
                             "tp1": entry + risk * self.rr1,
                             "tp2": entry + risk * self.rr2,
@@ -468,14 +461,14 @@ class RangeOscillatorStrategy(BaseStrategy):
                             "reason": "🟢 R1: 收缩突破做多(BB上轨)"})
                 return sig
 
-        # ── R2: 区间高点突破 ─────────────────────────────────────
+        # ── R2: 区间高点突破 (V5.0: RSI范围放宽，body_ok可选) ──
         if (j >= self.range_lookback and
                 C[j] > RNG_H[j-1] and C[j] > O[j]
-                and adx_rising and body_ok
-                and 45 < RSI[j] < 72):
+                and (adx_rising or vol_ok)
+                and 40 < RSI[j] < 78):
             sl = RNG_L[j] - sl_pad
             risk = entry - sl
-            if risk > entry * 0.002:
+            if risk > entry * 0.001:
                 sig.update({"action": "BUY", "entry": entry, "sl": sl,
                             "tp1": entry + risk * self.rr1,
                             "tp2": entry + risk * self.rr2,
@@ -483,13 +476,12 @@ class RangeOscillatorStrategy(BaseStrategy):
                             "reason": "🟢 R2: 区间高点突破做多(ADX启动)"})
                 return sig
 
-        # ── R3: 收缩突破做空 ─────────────────────────────────────
-        # V4.0: 止损 = 突破K线最高价 + 0.5×ATR
+        # ── R3: 收缩突破做空 (V5.0: body_ok可选) ──
         if (had_squeeze and C[j] < BB_L[j] and C[j] < O[j]
-                and body_ok and vol_ok and RSI[j] > 25):
+                and vol_ok and RSI[j] > 22):
             sl = H[j] + ATR[j] * 0.5
             risk = sl - entry
-            if risk > entry * 0.002:
+            if risk > entry * 0.001:
                 sig.update({"action": "SELL", "entry": entry, "sl": sl,
                             "tp1": entry - risk * self.rr1,
                             "tp2": entry - risk * self.rr2,
@@ -497,19 +489,44 @@ class RangeOscillatorStrategy(BaseStrategy):
                             "reason": "🔴 R3: 收缩突破做空(BB下轨)"})
                 return sig
 
-        # ── R4: 区间低点突破 ─────────────────────────────────────
+        # ── R4: 区间低点突破 (V5.0: RSI范围放宽) ──
         if (j >= self.range_lookback and
                 C[j] < RNG_L[j-1] and C[j] < O[j]
-                and adx_rising and body_ok
-                and 28 < RSI[j] < 55):
+                and (adx_rising or vol_ok)
+                and 22 < RSI[j] < 60):
             sl = RNG_H[j] + sl_pad
             risk = sl - entry
-            if risk > entry * 0.002:
+            if risk > entry * 0.001:
                 sig.update({"action": "SELL", "entry": entry, "sl": sl,
                             "tp1": entry - risk * self.rr1,
                             "tp2": entry - risk * self.rr2,
                             "risk_r": risk,
                             "reason": "🔴 R4: 区间低点突破做空(ADX启动)"})
+                return sig
+
+        # ── R5 (V5.0 新增): 简单布林带方向突破（无需收缩，但需要量能+实体确认）
+        if (C[j] > BB_U[j] and C[j] > O[j] and body_ok and vol_ok
+                and RSI[j] < 75 and ADX[j] < 30):
+            sl = df['bb_mid'].values[j] - ATR[j] * 0.3
+            risk = entry - sl
+            if risk > entry * 0.001:
+                sig.update({"action": "BUY", "entry": entry, "sl": sl,
+                            "tp1": entry + risk * self.rr1,
+                            "tp2": entry + risk * self.rr2,
+                            "risk_r": risk,
+                            "reason": "🟢 R5: BB上轨突破(量价确认)"})
+                return sig
+
+        if (C[j] < BB_L[j] and C[j] < O[j] and body_ok and vol_ok
+                and RSI[j] > 25 and ADX[j] < 30):
+            sl = df['bb_mid'].values[j] + ATR[j] * 0.3
+            risk = sl - entry
+            if risk > entry * 0.001:
+                sig.update({"action": "SELL", "entry": entry, "sl": sl,
+                            "tp1": entry - risk * self.rr1,
+                            "tp2": entry - risk * self.rr2,
+                            "risk_r": risk,
+                            "reason": "🔴 R6: BB下轨突破(量价确认)"})
                 return sig
 
         return sig

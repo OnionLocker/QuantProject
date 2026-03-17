@@ -17,6 +17,25 @@ logger = logging.getLogger("risk_manager")
 
 
 class RiskManager:
+    # ── 默认参数常量 ──────────────────────────────────────────────────────
+    DEFAULT_DRAWDOWN_WARNING_PCT:  float = 0.03   # 3% 回撤警告
+    DEFAULT_DRAWDOWN_REDUCE_PCT:   float = 0.05   # 5% 回撤减仓
+    DEFAULT_DRAWDOWN_HALT_PCT:     float = 0.08   # 8% 回撤暂停
+    DEFAULT_EQUITY_EMA_PERIOD:     int   = 10     # Equity Curve EMA 周期
+    DEFAULT_EQUITY_HISTORY_LEN:    int   = 50     # 保留最近 N 笔交易余额
+    DEFAULT_EQUITY_MIN_SAMPLES:    int   = 5      # 至少 N 笔交易才启用 EMA 降权
+    EQUITY_BELOW_EMA_SCALE:        float = 0.6    # 资金曲线低于均线时降至 60%
+    DEFAULT_BASE_RISK_PCT:         float = 0.01   # 基础风险比例 1%
+    DEFAULT_RECENT_PNLS_LEN:       int   = 20     # 最近 N 笔盈亏
+    DEFAULT_MAX_DAILY_TRADES:      int   = 8      # 每日最多交易次数
+    MIN_EFFECTIVE_RISK_PCT:        float = 0.001  # 最低有效风险比例 0.1%
+    KELLY_MIN_MULT:                float = 0.5    # Kelly 最低仓位乘数
+    KELLY_MAX_MULT:                float = 1.5    # Kelly 最高仓位乘数
+    KELLY_MIN_SAMPLES:             int   = 3      # 最少 N 笔交易才启用动态调节
+    LOSS_PENALTY_PER_LOSS:         float = 0.15   # 每次连续亏损的惩罚系数
+    LOSS_PENALTY_MIN:              float = 0.4    # 连亏惩罚最低值
+    LOSS_PENALTY_TRIGGER:          int   = 2      # 连亏 N 次开始惩罚
+
     def __init__(self, max_trade_amount=1000, is_trading_allowed=True,
                  max_consecutive_losses=3, daily_loss_limit_pct=0.05):
         self.max_trade_amount       = max_trade_amount
@@ -29,30 +48,30 @@ class RiskManager:
         self._daily_loss_triggered  = False
 
         # ── V4.0: 回撤保护 ────────────────────────────────────────────────
-        self._peak_balance:        float = 0.0      # 历史最高余额
-        self._drawdown_warning_pct: float = 0.03    # 3% 回撤警告
-        self._drawdown_reduce_pct:  float = 0.05    # 5% 回撤减仓
-        self._drawdown_halt_pct:    float = 0.08    # 8% 回撤暂停
-        self._drawdown_level:      str   = "normal" # normal/warning/reduced/halted
+        self._peak_balance:        float = 0.0
+        self._drawdown_warning_pct: float = self.DEFAULT_DRAWDOWN_WARNING_PCT
+        self._drawdown_reduce_pct:  float = self.DEFAULT_DRAWDOWN_REDUCE_PCT
+        self._drawdown_halt_pct:    float = self.DEFAULT_DRAWDOWN_HALT_PCT
+        self._drawdown_level:      str   = "normal"
 
         # ── V4.0: Equity Curve Trading ────────────────────────────────────
-        self._equity_history: deque = deque(maxlen=50)  # 最近50笔交易后的余额
-        self._equity_ema_period:  int   = 10            # EMA 周期
+        self._equity_history: deque = deque(maxlen=self.DEFAULT_EQUITY_HISTORY_LEN)
+        self._equity_ema_period:  int   = self.DEFAULT_EQUITY_EMA_PERIOD
         self._equity_ema:         float = 0.0
-        self._equity_below_ema:   bool  = False         # 余额低于 EMA = 降权
+        self._equity_below_ema:   bool  = False
 
         # ── V4.0: Regime 感知仓位调节 ─────────────────────────────────────
-        self._regime_risk_mult:   float = 1.0  # 当前 regime 风险乘数
+        self._regime_risk_mult:   float = 1.0
         self._regime_name:        str   = ""
 
         # ── V4.0: 动态风险预算 ────────────────────────────────────────────
-        self._base_risk_pct:      float = 0.01   # 基础风险比例
-        self._dynamic_risk_pct:   float = 0.01   # 当前动态风险比例
-        self._recent_pnls: deque = deque(maxlen=20)  # 最近20笔盈亏
+        self._base_risk_pct:      float = self.DEFAULT_BASE_RISK_PCT
+        self._dynamic_risk_pct:   float = self.DEFAULT_BASE_RISK_PCT
+        self._recent_pnls: deque = deque(maxlen=self.DEFAULT_RECENT_PNLS_LEN)
 
         # ── V4.0: 每日交易次数限制 ────────────────────────────────────────
         self._daily_trade_count:  int = 0
-        self._max_daily_trades:   int = 8         # 每日最多 8 笔交易
+        self._max_daily_trades:   int = self.DEFAULT_MAX_DAILY_TRADES
 
     # ── V4.0: 回撤保护 ────────────────────────────────────────────────────
 
@@ -131,8 +150,8 @@ class RiskManager:
     @property
     def equity_curve_scale(self) -> float:
         """Equity Curve Trading 仓位缩放系数。"""
-        if self._equity_below_ema and len(self._equity_history) >= 5:
-            return 0.6  # 资金曲线低于均线时降至 60%
+        if self._equity_below_ema and len(self._equity_history) >= self.DEFAULT_EQUITY_MIN_SAMPLES:
+            return self.EQUITY_BELOW_EMA_SCALE
         return 1.0
 
     # ── V4.0: Regime 感知仓位调节 ─────────────────────────────────────────
@@ -169,7 +188,7 @@ class RiskManager:
         连续盈利 → 适度加仓（Kelly 精神）
         连续亏损 → 大幅降仓（保护本金优先）
         """
-        if len(self._recent_pnls) < 3:
+        if len(self._recent_pnls) < self.KELLY_MIN_SAMPLES:
             self._dynamic_risk_pct = self._base_risk_pct
             return
 
@@ -177,13 +196,16 @@ class RiskManager:
         wins = sum(1 for p in pnls if p > 0)
         win_rate = wins / len(pnls)
 
-        # 简化 Kelly: risk_mult = max(0.5, min(2.0, 2*WR - 1 + 1))
+        # 简化 Kelly: risk_mult = max(0.5, min(1.5, 2*WR))
         # WR=0.3 → 0.6x, WR=0.5 → 1.0x, WR=0.7 → 1.4x
-        kelly_mult = max(0.5, min(1.5, win_rate * 2.0))
+        kelly_mult = max(self.KELLY_MIN_MULT, min(self.KELLY_MAX_MULT, win_rate * 2.0))
 
         # 连续亏损额外惩罚
-        if self._consecutive_losses >= 2:
-            loss_penalty = max(0.4, 1.0 - self._consecutive_losses * 0.15)
+        if self._consecutive_losses >= self.LOSS_PENALTY_TRIGGER:
+            loss_penalty = max(
+                self.LOSS_PENALTY_MIN,
+                1.0 - self._consecutive_losses * self.LOSS_PENALTY_PER_LOSS,
+            )
             kelly_mult *= loss_penalty
 
         self._dynamic_risk_pct = self._base_risk_pct * kelly_mult
@@ -198,7 +220,7 @@ class RiskManager:
         effective *= self.drawdown_scale
         effective *= self.equity_curve_scale
         effective *= self.regime_scale
-        return max(0.001, effective)  # 最低 0.1%
+        return max(self.MIN_EFFECTIVE_RISK_PCT, effective)
 
     # ── 原有方法保持兼容 ─────────────────────────────────────────────────────
 

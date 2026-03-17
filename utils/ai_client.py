@@ -12,31 +12,39 @@ utils/ai_client.py - AI 情绪分析客户端 (V2.0)
   AI_BASE_URL:   API 端点（默认 https://api.openai.com/v1）
   AI_MODEL:      模型名（默认 gpt-4o-mini）
 """
+from __future__ import annotations
 
-import os
 import json
-import time
 import logging
-import urllib.request
+import os
+import re
+import time
 import urllib.error
-from typing import Optional
+import urllib.request
+from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger("ai_client")
+logger: logging.Logger = logging.getLogger("ai_client")
+
+# ── 常量定义 ──────────────────────────────────────────────────────────────────
+_CONFIG_CACHE_TTL_SEC: int = 60      # 配置缓存有效期（秒）
+_MAX_HEADLINES: int = 15             # 情绪分析最多输入标题数
+_MAX_RESPONSE_TOKENS: int = 200      # AI 回复最大 token 数
+_DEFAULT_CONFIDENCE: float = 0.5     # 默认置信度
+_ERROR_BODY_MAX_LEN: int = 200       # HTTP 错误体截断长度
 
 # ── 配置加载 ──────────────────────────────────────────────────────────────────
 
-_config_cache: dict = {}
+_config_cache: Dict[str, str] = {}
 _config_load_time: float = 0
 
 
-def _load_ai_config() -> dict:
+def _load_ai_config() -> Dict[str, str]:
     """
     加载 AI 客户端配置。优先级：环境变量 > config.yaml ai 节。
     """
     global _config_cache, _config_load_time
 
-    # 60秒缓存
-    if _config_cache and (time.time() - _config_load_time) < 60:
+    if _config_cache and (time.time() - _config_load_time) < _CONFIG_CACHE_TTL_SEC:
         return _config_cache
 
     # 从环境变量
@@ -99,7 +107,7 @@ _SENTIMENT_PROMPT = """你是一个加密货币市场情绪分析专家。请分
 {headlines}"""
 
 
-def analyze_sentiment(headlines: list[str], timeout: float = 15.0) -> float:
+def analyze_sentiment(headlines: List[str], timeout: float = 15.0) -> float:
     """
     调用 AI 对新闻标题进行情绪分析。
 
@@ -116,13 +124,13 @@ def analyze_sentiment(headlines: list[str], timeout: float = 15.0) -> float:
         return 0.0
 
     # 构建 prompt
-    headlines_text = "\n".join(f"- {h}" for h in headlines[:15])  # 最多 15 条
+    headlines_text = "\n".join(f"- {h}" for h in headlines[:_MAX_HEADLINES])
     prompt = _SENTIMENT_PROMPT.format(headlines=headlines_text)
 
     try:
         result = _chat_completion(
             prompt=prompt,
-            max_tokens=200,
+            max_tokens=_MAX_RESPONSE_TOKENS,
             temperature=0.3,
             timeout=timeout,
         )
@@ -133,7 +141,7 @@ def analyze_sentiment(headlines: list[str], timeout: float = 15.0) -> float:
         parsed = _extract_json(result)
         if parsed and "score" in parsed:
             score = float(parsed["score"])
-            confidence = float(parsed.get("confidence", 0.5))
+            confidence = float(parsed.get("confidence", _DEFAULT_CONFIDENCE))
             summary = parsed.get("summary", "")
             logger.info(
                 f"AI 情绪分析: score={score:+.2f} conf={confidence:.2f} | {summary}"
@@ -141,7 +149,7 @@ def analyze_sentiment(headlines: list[str], timeout: float = 15.0) -> float:
             # 将置信度融入分数（低置信度时衰减分数）
             return max(-1.0, min(1.0, score * confidence))
         else:
-            logger.warning(f"AI 返回格式异常: {result[:200]}")
+            logger.warning(f"AI 返回格式异常: {result[:_ERROR_BODY_MAX_LEN]}")
             return 0.0
 
     except Exception as e:
@@ -149,7 +157,7 @@ def analyze_sentiment(headlines: list[str], timeout: float = 15.0) -> float:
         return 0.0
 
 
-def analyze_sentiment_detailed(headlines: list[str]) -> Optional[dict]:
+def analyze_sentiment_detailed(headlines: List[str]) -> Optional[Dict[str, Any]]:
     """
     详细版 AI 分析，返回完整结果（供 API 端点使用）。
     
@@ -279,7 +287,7 @@ def _chat_completion(prompt: str, max_tokens: int = 500,
     except urllib.error.HTTPError as e:
         body = ""
         try:
-            body = e.read().decode("utf-8")[:200]
+            body = e.read().decode("utf-8")[:_ERROR_BODY_MAX_LEN]
         except Exception:
             pass
         logger.warning(f"AI API HTTP {e.code}: {body}")
@@ -289,7 +297,7 @@ def _chat_completion(prompt: str, max_tokens: int = 500,
         return None
 
 
-def _extract_json(text: str) -> Optional[dict]:
+def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     """从 AI 回复中提取 JSON 对象（兼容 markdown 代码块）。"""
     text = text.strip()
 
@@ -300,7 +308,6 @@ def _extract_json(text: str) -> Optional[dict]:
         pass
 
     # 尝试从 markdown 代码块提取
-    import re
     match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
     if match:
         try:

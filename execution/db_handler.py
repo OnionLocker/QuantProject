@@ -15,8 +15,11 @@ import sqlite3
 import os
 import time
 import json
+import logging
 import threading
 from datetime import datetime
+
+logger = logging.getLogger("db_handler")
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
@@ -61,7 +64,7 @@ def close_thread_conn():
     if conn is not None:
         try:
             conn.close()
-        except Exception:
+        except (sqlite3.Error, OSError):
             pass
         _thread_local.conn = None
 
@@ -289,7 +292,8 @@ def load_backtest_history_detail(user_id: int, history_id: int) -> dict | None:
         return None
     try:
         return _json.loads(row[0])
-    except Exception:
+    except (ValueError, TypeError) as e:
+        logger.warning("回测历史 JSON 解析失败 (id=%d): %s", history_id, e)
         return None
 
 
@@ -374,7 +378,7 @@ def load_user_config(user_id: int) -> dict:
     if params:
         try:
             params = json.loads(params)
-        except Exception:
+        except (ValueError, TypeError):
             params = {}
     else:
         params = {}
@@ -385,7 +389,7 @@ def load_user_config(user_id: int) -> dict:
         keys = [d[0] for d in row.description] if hasattr(row, 'description') else list(row.keys())
         if "risk_config" in keys and row["risk_config"]:
             risk_cfg = json.loads(row["risk_config"])
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
         pass
 
     return {

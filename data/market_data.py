@@ -30,8 +30,13 @@ def _get_public_exchange():
 
 # ── 缓存辅助 ─────────────────────────────────────────────────────────────────
 
-CACHE_DIR      = os.path.join(project_root, "data", "cache")
+CACHE_DIR       = os.path.join(project_root, "data", "cache")
 CACHE_TTL_HOURS = 12
+MAX_CONSECUTIVE_DOWNLOAD_ERRORS = 5      # 连续下载失败上限
+DOWNLOAD_TIMEOUT_SEC            = 120    # 单次下载总超时（秒）
+DOWNLOAD_BATCH_SIZE             = 300    # 每批 K 线数量
+DOWNLOAD_RATE_LIMIT_SEC         = 0.12   # 批次间等待时间（秒）
+DOWNLOAD_ERROR_WAIT_SEC         = 2      # 出错后重试等待（秒）
 
 
 def _cache_path(symbol: str, timeframe: str) -> str:
@@ -55,36 +60,34 @@ def _download_range(symbol: str, timeframe: str,
     all_ohlcv        = []
     cursor           = since_ms
     consecutive_errors = 0
-    MAX_ERRORS       = 5
-    TIMEOUT_SEC      = 120
-    deadline         = time.time() + TIMEOUT_SEC
+    deadline         = time.time() + DOWNLOAD_TIMEOUT_SEC
 
     while cursor < until_ms:
         if time.time() > deadline:
             raise TimeoutError(
-                f"数据下载超时（>{TIMEOUT_SEC}s），已获取 {len(all_ohlcv)} 根 K 线。"
+                f"数据下载超时（>{DOWNLOAD_TIMEOUT_SEC}s），已获取 {len(all_ohlcv)} 根 K 线。"
                 "请检查网络或稍后重试。"
             )
         try:
-            batch = ex.fetch_ohlcv(symbol, timeframe, since=cursor, limit=300)
+            batch = ex.fetch_ohlcv(symbol, timeframe, since=cursor, limit=DOWNLOAD_BATCH_SIZE)
             consecutive_errors = 0
             if not batch:
                 break
             all_ohlcv.extend(batch)
             last_ts = batch[-1][0]
-            if last_ts >= until_ms or len(batch) < 300:
+            if last_ts >= until_ms or len(batch) < DOWNLOAD_BATCH_SIZE:
                 break
             cursor = last_ts + 1
-            time.sleep(0.12)
+            time.sleep(DOWNLOAD_RATE_LIMIT_SEC)
         except Exception as e:
             consecutive_errors += 1
-            print(f"[market_data] 下载出错({consecutive_errors}/{MAX_ERRORS}): {e}")
-            if consecutive_errors >= MAX_ERRORS:
+            print(f"[market_data] 下载出错({consecutive_errors}/{MAX_CONSECUTIVE_DOWNLOAD_ERRORS}): {e}")
+            if consecutive_errors >= MAX_CONSECUTIVE_DOWNLOAD_ERRORS:
                 raise RuntimeError(
-                    f"连续 {MAX_ERRORS} 次请求失败，放弃下载 {symbol} 数据。"
+                    f"连续 {MAX_CONSECUTIVE_DOWNLOAD_ERRORS} 次请求失败，放弃下载 {symbol} 数据。"
                     f"最后错误: {e}"
                 )
-            time.sleep(2)
+            time.sleep(DOWNLOAD_ERROR_WAIT_SEC)
 
     if not all_ohlcv:
         return pd.DataFrame()
@@ -129,8 +132,8 @@ def fetch_history_range(symbol: str, timeframe: str,
                     mask = (cached.index >= start_dt) & (cached.index < end_dt)
                     print(f"[market_data] 命中缓存 {os.path.basename(cache_file)}")
                     return cached[mask]
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[market_data] 缓存读取失败，将重新下载: {e}")
 
     # 下载
     print(f"[market_data] 下载 {symbol} {timeframe} [{start_date} → {end_date}]...")
@@ -145,8 +148,8 @@ def fetch_history_range(symbol: str, timeframe: str,
             df = pd.concat([old, df])
             df = df[~df.index.duplicated(keep="last")]
             df.sort_index(inplace=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[market_data] 缓存合并失败（将覆盖写入）: {e}")
     df.to_csv(cache_file)
     print(f"[market_data] 缓存已更新: {os.path.basename(cache_file)} ({len(df)} 根 K 线)")
 
