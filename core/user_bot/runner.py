@@ -499,6 +499,8 @@ def _handle_open_position(
     """
     空仓时根据信号开仓。
     返回更新后的 state；若未开仓则返回 None。
+
+    V5.1: 拒绝理由透明化 — 所有跳过开仓的分支都输出具体数值对比。
     """
     action = signal["action"]
     if state["position_amount"] != 0 or action not in ("BUY", "SELL"):
@@ -531,7 +533,7 @@ def _handle_open_position(
     # V4.0: 信号质量仓位缩放
     contracts = _apply_signal_quality_scaling(p, contracts)
     if contracts == 0:
-        return None  # 信号质量太低，跳过
+        return None  # 信号质量太低，跳过（日志已在子函数中输出）
 
     # V1.5: 策略过渡期半仓
     if p.use_auto and p.selector is not None and p.selector.in_transition:
@@ -546,10 +548,21 @@ def _handle_open_position(
     contracts = min(contracts, max_contracts_by_amount)
 
     if contracts < 1:
-        p.logger.info(f"{p.tag} 仓位计算 <1 张（止损太宽或余额不足），跳过")
+        p.logger.info(
+            f"{p.tag} ❌ 拒绝开仓: 仓位计算 <1 张 "
+            f"(余额={usdt_free:.2f}U, risk_per={risk_per:.4f}, "
+            f"effective_risk={effective_risk*100:.2f}%, SL距离={abs(current_price - target_sl):.2f})"
+        )
         return None
 
     if not p.rm.check_order(p.symbol, action.lower(), contracts):
+        # V5.1: 风控拒绝透明化
+        p.logger.info(
+            f"{p.tag} ❌ 拒绝开仓（风控）: {action} {contracts}张 {p.symbol} "
+            f"| 熔断={p.rm.is_fused}, 连亏={p.rm.consecutive_losses}, "
+            f"日亏={getattr(p.rm, '_daily_loss', 0):.2f}U, "
+            f"日交易次数={getattr(p.rm, '_daily_trade_count', 0)}"
+        )
         return None
 
     open_side  = "buy"  if action == "BUY"  else "sell"
@@ -623,16 +636,27 @@ def _apply_signal_quality_scaling(p: _RunParams, contracts: int) -> int:
         return contracts
 
     signal_quality = getattr(p.selector, '_signal_quality_score', 100)
+    quality_detail = getattr(p.selector, 'last_signal_quality', {})
     if signal_quality < _LOW_SIGNAL_QUALITY_SKIP:
+        # V5.1: 拒绝理由透明化 — 输出信号质量明细
         p.logger.info(
-            f"{p.tag} 📊 信号质量={signal_quality:.0f} < {_LOW_SIGNAL_QUALITY_SKIP}，跳过开仓"
+            f"{p.tag} ❌ 拒绝开仓（信号质量不足）: "
+            f"信号分 {signal_quality:.0f} < 门槛 {_LOW_SIGNAL_QUALITY_SKIP} | "
+            f"明细: tech={quality_detail.get('tech', 0)}, "
+            f"extra={quality_detail.get('extra', 0)}, "
+            f"news={quality_detail.get('news', 0)}, "
+            f"mtf={quality_detail.get('mtf', 0)}, "
+            f"consistency={quality_detail.get('consistency', 0)}, "
+            f"volatility={quality_detail.get('volatility', 0)} | "
+            f"缺失源={quality_detail.get('unknown_sources', [])}"
         )
         return 0
     elif signal_quality < _MID_SIGNAL_QUALITY:
         sq_scale = max(_MIN_SIGNAL_QUALITY_SCALE, signal_quality / 100.0)
         contracts = max(1, int(contracts * sq_scale))
         p.logger.info(
-            f"{p.tag} 📊 信号质量={signal_quality:.0f}，仓位缩放={sq_scale:.2f} → {contracts} 张"
+            f"{p.tag} 📊 信号质量={signal_quality:.0f}（中等, 门槛={_MID_SIGNAL_QUALITY}），"
+            f"仓位缩放={sq_scale:.2f} → {contracts} 张"
         )
 
     # V2.5: 策略绩效降权

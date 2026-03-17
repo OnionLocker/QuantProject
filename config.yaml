@@ -27,7 +27,7 @@ selector:
   adx_range_thresh: 13         # V5.0: 从16降到13，更少行情被判为震荡
   ema_short:        10         # V5.0: 从12降到10，更灵敏
   ema_mid:          30         # V5.0: 从36降到30，提升反应速度
-  ema_long:         80         # V5.0: 从96降到80，减少趋势确认滞后
+  ema_long:         120        # V5.1: 从80提到120，对应5天趋势线，过滤小周期噪音
   bb_period:        20
   bb_squeeze_pct:   0.04       # V5.0: 从0.035提到0.04，更容易识别挤压
 
@@ -76,8 +76,8 @@ selector:
   dynamic_veto_pctile:  95     # V5.0: 从92提高到95，更少触发否决
 
   # V4.0: 信号质量评分阈值 (V5.0: 大幅降低门槛)
-  signal_quality_full:  40     # V5.0: 从55降到40
-  signal_quality_half:  25     # V5.0: 从35降到25
+  signal_quality_full:  40     # V5.1: 保持40
+  signal_quality_half:  20     # V5.1: 从25降到20，配合归一化评分
 
   # 各策略的参数覆盖 (V5.0: BTC 1h 盈利导向优化)
   strategy_params:
@@ -86,7 +86,7 @@ selector:
       ema_slow:      21
       ema_trend:     30         # V5.0: 从34降到30
       adx_threshold: 18         # V5.0: 从20降到18
-      atr_sl_mult:   1.0        # V5.0: 从1.1降到1.0，止损更紧
+      atr_sl_mult:   1.5        # V5.1: 从1.0提到1.5，BTC 1H插针容错（机构博弈环境）
       rr1:           1.5        # V5.0: 从1.4提到1.5，风险收益比更优
       rsi_os:        45         # V5.0: 从42放宽到45，更容易触发B2回调买点
       cooldown:      2          # V5.0: 从3降到2
@@ -95,7 +95,7 @@ selector:
       ema_slow:      21
       ema_trend:     30
       adx_threshold: 18
-      atr_sl_mult:   1.0
+      atr_sl_mult:   1.5        # V5.1: 统一1.5，BTC 1H插针容错
       rr1:           1.5
       rsi_ob:        55         # V5.0: 从58降到55，更容易触发S2反弹空点
       cooldown:      2
@@ -108,7 +108,7 @@ selector:
       adx_rise_thresh:  1.0     # V5.0: 从1.5降到1.0
       vol_mult:      1.05       # V5.0: 从1.15降到1.05
       body_ratio_min: 45.0      # V5.0: 从50降到45
-      atr_sl_mult:   0.8        # V5.0: 从1.0降到0.8
+      atr_sl_mult:   1.5        # V5.1: 从0.8提到1.5，统一BTC 1H插针容错
       rr1:           1.5
       rr2:           2.8
       cooldown:      3          # V5.0: 从4降到3
@@ -117,7 +117,7 @@ selector:
       vol_mult:      1.1        # V5.0: 从1.15降到1.1
       body_ratio_min: 45.0      # V5.0: 从50降到45
       sl_mode:       1
-      atr_sl_mult:   1.0        # V5.0: 从1.1降到1.0
+      atr_sl_mult:   1.5        # V5.1: 从1.0提到1.5，统一BTC 1H插针容错
       rr1:           1.5        # V5.0: 从1.4提到1.5
       breakout_lookback: 10     # V5.0: 从12降到10
       high_pos_lookback: 36

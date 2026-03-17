@@ -8,6 +8,7 @@
 
 | 版本 | 内容 |
 |------|------|
+| **V5.1** | 🧠 信号质量评分系统重构：动态权重归一化（UNKNOWN数据源权重自动转移给技术面，纯技术面 conf>0.8 可达 80+ 分）；Breakout Fast-Track（突破 regime 跳过 K 线确认立即切换）；`ema_long` 80→120（5天趋势线过滤噪音）；`atr_sl_mult` 全策略统一 1.5（BTC 1H 插针容错）；`signal_quality_half` 25→20；B1/S1 信号 `vol_ratio` 从硬性必选改为加分项（捕捉无量慢牛）；`runner.py` 拒绝开仓理由透明化（信号质量明细 + 风控数值对比）；待定切换日志（观察防抖是否过厚） |
 | **V4.1** | 📰 OpenClaw 新闻同步集成：`/api/news-sync/*` 4 端点（config/ingest/run/status）、标准化同步脚本 `news_sync_runner.py`、Dashboard 新闻同步状态卡片（启用/权重/最近同步/判断 + 手动同步按钮）；选择器参数全面调优（降低 ADX/EMA 延迟、加快确认）；`news_weight` 默认 0.08 启用新闻辅助；余额获取增强（OKX 模拟盘 `totalEq`/`adjEq` 回退 + `fetch_accounts` 第三级回退）；异常通知附带 traceback 调用栈远程排查；余额为 0 自动告警；`startbot.sh` 优先 venv Python；`stopbot.sh` 增强进程匹配 |
 | **V4.0** | 🏛️ 机构级升级：多时间框架确认(MTF)、信号质量评分系统[0-100]、VWAP偏离度过滤、动态否决权阈值、OI连续性分析、成交量确认过滤器、Regime切换旧仓管理、三级回撤保护、Equity Curve Trading、动态风险预算(简化Kelly)、每日交易次数限制、RANGE止损优化 |
 | **V3.5** | 回测引擎大升级：AUTO 模式回测、追踪止损、时间止损、动态仓位、策略切换明细、per-strategy 统计；前端回测页高级功能面板 |
@@ -152,8 +153,8 @@ QuantProject/
 ├── strategy/
 │   ├── base.py                 # 策略基类 BaseStrategy
 │   ├── registry.py             # 策略注册表 _REGISTRY（热插拔）
-│   ├── selector.py             # 🔄 V4.0 市场状态判断 + 策略自动选择器 (AUTO)
-│   │                           #   MTF + 信号质量评分 + VWAP + 动态否决权
+│   ├── selector.py             # 🔄 V5.1 市场状态判断 + 策略自动选择器 (AUTO)
+│   │                           #   动态权重归一化 + Breakout Fast-Track + MTF + VWAP
 │   ├── regime_detector.py      # 市场 regime 检测辅助
 │   ├── pa_setups.py            # PA_5S：Price Action 五种形态
 │   ├── adaptive.py             # ADAPTIVE：自适应混合
@@ -483,14 +484,15 @@ QuantProject/
    - 多源新闻抓取 + 关键词/AI 情绪评分
    - 支持 OpenAI / DeepSeek 等兼容接口（可选增强）
    - 动态权重：根据新闻新鲜度、数量、AI 可用性自动调整
-5. **信号质量评分**（🆕 V4.0，[0-100] 分）：
-   - 5 维评分：技术面(30) + 多源一致性(25) + 链上(20) + MTF(15) + 波动率(10)
-   - ≥60 满仓 / 40~60 缩仓 / <40 不开仓
+5. **信号质量评分**（V5.1 动态权重归一化，[0-100] 分）：
+   - 6 维基础权重池：技术面(40) + 链上(15) + 新闻(10) + MTF(15) + 一致性(10) + 波动率(10)
+   - UNKNOWN 数据源权重自动转移给技术面（纯技术面模式下 tech_conf>0.8 即可 80+）
+   - ≥40 满仓 / 20~40 缩仓 / <20 不开仓
 6. **WAIT 观望状态**（V1.5）：
    - ADX 模糊区间 + ATR 突变无方向 → 不交易
    - 策略切换过渡期前 3 根 K 线半仓试探
 7. **加权投票** → 判定 regime：`bull` / `bear` / `ranging` / `breakout` / `wait`
-8. **防抖保护**：动态 confirm_bars（置信度 >0.65 仅需 1 根，<0.35 需 3 根）
+8. **防抖保护**：动态 confirm_bars（置信度 >0.65 仅需 1 根，<0.35 需 3 根；🆕 V5.1: BREAKOUT 跳过确认立即切换）
 9. **策略映射**：根据 `selector.strategy_bull/bear/ranging/breakout` 映射到具体策略
 10. 🆕 **Regime 切换旧仓管理**：BULL→BEAR 立即平多，切 WAIT 收紧止损 50%
 
@@ -588,11 +590,12 @@ effective_risk = base_risk × kelly × drawdown_scale × equity_scale × regime_
 
 | 质量分 | 仓位 | 说明 |
 |--------|------|------|
-| ≥ 60 | 100% | 满仓开仓 |
-| 40~60 | `quality/100` | 按比例缩仓 |
-| < 40 | 0% | 不开仓 |
+| ≥ 40 | 100% | 满仓开仓 |
+| 20~40 | `quality/100` | 按比例缩仓 |
+| < 20 | 0% | 不开仓 |
 
-信号质量分由 selector 的 5 维评分系统计算 [0, 100]。
+信号质量分由 selector 的 V5.1 动态权重归一化评分系统计算 [0, 100]。
+UNKNOWN 数据源（链上/新闻/MTF）的权重自动转移给技术面，确保纯技术面模式不被惩罚。
 
 ### 7.4 风控生命周期
 
@@ -652,7 +655,7 @@ selector:                       # AUTO 模式选择器参数
   adx_range_thresh: 16          # ADX < 此值认为震荡（从 18 降至 16）
   ema_short: 12                 # 快速 EMA（从 14 降至 12）
   ema_mid: 36                   # 中速 EMA（从 40 降至 36）
-  ema_long: 96                  # 慢速 EMA（从 120 降至 96）
+  ema_long: 120                 # 🔄 V5.1: 慢速 EMA 120（5天趋势线，过滤小周期噪音）
   bb_squeeze_pct: 0.035         # 布林带挤压判定（从 0.03 放宽至 0.035）
   confirm_bars_fast: 1          # 高置信度直接确认（从 2 降至 1）
   confirm_bars_slow: 3          # 低置信度确认（从 4 降至 3）
@@ -669,8 +672,8 @@ selector:                       # AUTO 模式选择器参数
   dynamic_veto_enable: true     # 用动态百分位替代固定阈值
   dynamic_veto_pctile: 90       # 90th 百分位
   # V4.0: 信号质量评分阈值
-  signal_quality_full: 60       # >= 此分满仓
-  signal_quality_half: 40       # >= 此分半仓，< 此分不开仓
+  signal_quality_full: 40       # 🔄 V5.1: >= 此分满仓
+  signal_quality_half: 20       # 🔄 V5.1: >= 此分半仓，< 此分不开仓
   # ... 详细参数见 config.yaml 文件注释
 
 ai:                             # 🆕 V2.0: AI 情绪分析客户端
@@ -1065,13 +1068,18 @@ AI 情绪分析（`ai_client.py`）是**可选增强模块**。V4.1 起默认以
 
 ### Q3: 信号质量评分各维度的含义？
 
-| 维度 | 满分 | 数据源 | 说明 |
-|------|------|--------|------|
-| 技术面置信度 | 30 | ADX/EMA/BB/ATR/Vol/VWAP | 技术指标的综合确定性 |
-| 多源一致性 | 25 | 技术+链上+新闻+MTF | 多个独立来源方向一致 = 高质量 |
-| 链上数据质量 | 20 | 资金费率+OI | OKX 公开 API |
-| MTF方向确认 | 15 | 4h 级别 EMA | 高时间框架过滤，冲突时扣分 |
-| 波动率环境 | 10 | BB宽度/ATR水平 | 波动率适中 = 更适合交易 |
+V5.1 采用**动态权重归一化**：当某数据源为 UNKNOWN 时，其权重自动转移给技术面。
+
+| 维度 | 基础权重 | 数据源 | 说明 |
+|------|----------|--------|------|
+| 技术面置信度 | 40 (+UNKNOWN池) | ADX/EMA/BB/ATR/Vol/VWAP | 核心维度，UNKNOWN源权重全部叠加到此 |
+| 链上数据质量 | 15 | 资金费率+OI | OKX 公开 API，缺失时权重转给技术面 |
+| 新闻面 | 10 | OpenClaw 新闻评分 | 缺失时权重转给技术面 |
+| MTF方向确认 | 15 | 4h 级别 EMA | 缺失时权重转给技术面 |
+| 多源一致性 | 10 | 技术+链上+新闻+MTF | 仅1个有效源时直接给满分 |
+| 波动率环境 | 10 | BB宽度/ATR水平 | 基础5分 + tech_conf加成 |
+
+**关键特性**：纯技术面模式（链上+新闻+MTF均缺失）时，tech权重=40+15+10+15=80，tech_conf=0.85 时仅技术面一项即可拿到 68 分，加上一致性(10) + 波动率(~9) = **87 分**。
 
 ### Q4: V4.0 的动态风险预算如何工作？
 

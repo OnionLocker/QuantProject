@@ -1,5 +1,11 @@
 """
-strategy/selector.py - 市场状态判断 + 策略自动选择器 V4.0
+strategy/selector.py - 市场状态判断 + 策略自动选择器 V5.1
+
+V5.1 重构改进：
+  - 信号质量评分动态权重归一化：UNKNOWN 数据源权重自动转移给技术面
+  - 纯技术面模式下 tech_conf>0.8 即可达到 80+ 分
+  - 突破模式快速通道 (Fast-Track)：BREAKOUT 跳过 K 线确认，立即切换
+  - 待定切换日志：regime 变化但未达确认根数时输出日志
 
 V4.0 机构级改进：
   - 多时间框架确认 (MTF)：4h 高时间框架作为方向过滤器
@@ -66,7 +72,7 @@ class MarketRegimeSelector:
         self.adx_range_thresh = sc.get("adx_range_thresh", 18)   # ADX < 此值 = 震荡
         self.ema_short        = sc.get("ema_short",        14)
         self.ema_mid          = sc.get("ema_mid",          40)
-        self.ema_long         = sc.get("ema_long",        120)   # BTC 1h 推荐 120 ≈ 5天
+        self.ema_long         = sc.get("ema_long",        120)   # V5.1: BTC 1h 推荐 120 ≈ 5天
         self.bb_period        = sc.get("bb_period",        20)
         self.bb_squeeze_pct   = sc.get("bb_squeeze_pct",   0.03) # 带宽/中轨 < 此值 = 挤压
 
@@ -396,7 +402,7 @@ class MarketRegimeSelector:
             logger.debug(f"MTF 计算失败: {e}")
             return REGIME_UNKNOWN, 0.0
 
-    # ── V4.0: 信号质量评分系统 ────────────────────────────────────────────────
+    # ── V5.1: 信号质量评分系统（动态权重归一化）──────────────────────────────
     def _calc_signal_quality(self, tech_regime: str, tech_conf: float,
                               extra_regime: str, extra_conf: float,
                               news_regime: str, news_conf: float,
@@ -404,72 +410,119 @@ class MarketRegimeSelector:
                               final_regime: str) -> float:
         """
         综合评分系统 [0, 100]，衡量信号的可靠程度。
-        V5.0 BTC适配：重新校准，确保纯技术面模式下也能产生足够分数。
 
-        评分维度（V5.0 重新分配）：
-          1. 技术面置信度 (45分) ← 提升，作为主力
-          2. 多源一致性  (20分) ← 降低，避免单源惩罚
-          3. 链上数据质量 (10分) ← 降低，可选加分
-          4. MTF方向确认  (10分) ← 降低，辅助
-          5. 波动率环境   (15分) ← 提升基础分
+        V5.1 动态权重归一化重构：
+          核心改动：当链上/新闻/MTF 数据源缺失（UNKNOWN）时，不再直接扣分，
+          而是将 UNKNOWN 源的权重动态分配给 tech_conf（技术面），并做归一化。
+          确保：只要技术面趋势足够强（tech_conf > 0.8），纯技术面总分也能 80+。
+
+        基础权重池（满分100）：
+          - tech:        40 分
+          - extra:       15 分
+          - news:        10 分
+          - mtf:         15 分
+          - consistency: 10 分
+          - volatility:  10 分
+        当某数据源 UNKNOWN 时，其权重池按比例转移给 tech。
         """
         q = {}
-        total = 0.0
 
-        # 1. 技术面置信度 (0-45分) ← V5.0: 从30提升到45
-        tech_score = tech_conf * 45
+        # ── Step 1: 识别各数据源可用性 ─────────────────────────────────────
+        base_weights = {
+            "tech":        40.0,
+            "extra":       15.0,
+            "news":        10.0,
+            "mtf":         15.0,
+            "consistency": 10.0,
+            "volatility":  10.0,
+        }
+
+        unknown_pool = 0.0   # UNKNOWN 源释放出的权重
+        if extra_regime == REGIME_UNKNOWN:
+            unknown_pool += base_weights["extra"]
+            base_weights["extra"] = 0.0
+        if news_regime == REGIME_UNKNOWN:
+            unknown_pool += base_weights["news"]
+            base_weights["news"] = 0.0
+        if mtf_regime == REGIME_UNKNOWN:
+            unknown_pool += base_weights["mtf"]
+            base_weights["mtf"] = 0.0
+
+        # 将 UNKNOWN 源的权重全部分配给 tech
+        effective_tech_weight = base_weights["tech"] + unknown_pool
+
+        # ── Step 2: 各维度评分（按有效权重计算）──────────────────────────────
+
+        # 1. 技术面置信度：effective_tech_weight × tech_conf
+        tech_score = effective_tech_weight * tech_conf
         q["tech"] = round(tech_score, 1)
-        total += tech_score
+        q["tech_weight"] = round(effective_tech_weight, 1)
 
-        # 2. 多源一致性 (0-20分) ← V5.0: 从25降到20，单源基础分提高
-        sources = [tech_regime, extra_regime, news_regime, mtf_regime]
-        valid_sources = [s for s in sources if s != REGIME_UNKNOWN]
-        if valid_sources:
-            agree_count = sum(1 for s in valid_sources if s == final_regime)
-            agreement_ratio = agree_count / len(valid_sources)
-            consistency_score = agreement_ratio * 20
-            # 三源以上全一致额外加成
-            if agree_count >= 3:
-                consistency_score = min(20, consistency_score * 1.2)
-        else:
-            consistency_score = 10.0  # V5.0: 单源基础分从5提高到10
-
-        # V5.0: 只有1个有效源（纯技术面）时，给更高基础分
-        if len(valid_sources) == 1:
-            consistency_score = max(consistency_score, 12.0)
-
-        q["consistency"] = round(consistency_score, 1)
-        total += consistency_score
-
-        # 3. 链上数据质量 (0-10分) ← V5.0: 从20降到10
-        if extra_regime != REGIME_UNKNOWN:
-            extra_score = extra_conf * 10
+        # 2. 链上数据
+        if base_weights["extra"] > 0:
+            extra_score = base_weights["extra"] * extra_conf
             if extra_regime == final_regime:
-                extra_score = min(10, extra_score * 1.1)
+                extra_score = min(base_weights["extra"], extra_score * 1.15)
+            elif extra_regime != REGIME_UNKNOWN and extra_regime != final_regime:
+                extra_score *= 0.5   # 方向冲突打5折
         else:
             extra_score = 0.0
         q["extra"] = round(extra_score, 1)
-        total += extra_score
 
-        # 4. MTF方向确认 (0-10分) ← V5.0: 从15降到10，冲突扣分减少
-        if mtf_regime != REGIME_UNKNOWN:
+        # 3. 新闻面
+        if base_weights["news"] > 0:
+            news_score = base_weights["news"] * news_conf
+            if news_regime == final_regime:
+                news_score = min(base_weights["news"], news_score * 1.1)
+            elif news_regime != REGIME_UNKNOWN and news_regime != final_regime:
+                news_score *= 0.5
+        else:
+            news_score = 0.0
+        q["news"] = round(news_score, 1)
+
+        # 4. MTF 方向确认
+        if base_weights["mtf"] > 0:
             if mtf_regime == final_regime:
-                mtf_score = mtf_conf * 10
+                mtf_score = base_weights["mtf"] * mtf_conf
             else:
-                # MTF 方向冲突，轻微扣分（从-5改为-2）
-                mtf_score = -2.0
+                # MTF 方向冲突：不给分但也不扣分（旧版扣分导致低分）
+                mtf_score = 0.0
         else:
             mtf_score = 0.0
         q["mtf"] = round(mtf_score, 1)
-        total += mtf_score
 
-        # 5. 波动率环境 (0-15分) ← V5.0: 提升基础分
-        vol_score = 8.0 + (tech_conf * 7.0)  # 基础8分 + 技术面加成
+        # 5. 多源一致性
+        sources = [tech_regime, extra_regime, news_regime, mtf_regime]
+        valid_sources = [s for s in sources if s != REGIME_UNKNOWN]
+        n_valid = len(valid_sources)
+        if n_valid >= 2:
+            agree_count = sum(1 for s in valid_sources if s == final_regime)
+            agreement_ratio = agree_count / n_valid
+            consistency_score = base_weights["consistency"] * agreement_ratio
+            if agree_count >= 3:
+                consistency_score = min(base_weights["consistency"],
+                                       consistency_score * 1.3)
+        else:
+            # 只有1个有效源或0个：直接给满分（不因缺少数据源惩罚）
+            consistency_score = base_weights["consistency"]
+        q["consistency"] = round(consistency_score, 1)
+
+        # 6. 波动率环境：基础 5 分 + tech_conf 加成
+        vol_score = 5.0 + (tech_conf * 5.0)
+        vol_score = min(base_weights["volatility"], vol_score)
         q["volatility"] = round(vol_score, 1)
-        total += vol_score
 
-        total = max(0, min(100, total))
+        # ── Step 3: 汇总 & 归一化 ─────────────────────────────────────────
+        raw_total = (tech_score + extra_score + news_score +
+                     mtf_score + consistency_score + vol_score)
+        total = max(0, min(100, raw_total))
+
         q["total"] = round(total, 1)
+        q["unknown_sources"] = [
+            name for name, regime in
+            [("extra", extra_regime), ("news", news_regime), ("mtf", mtf_regime)]
+            if regime == REGIME_UNKNOWN
+        ]
         self.last_signal_quality = q
         self._signal_quality_score = total
         return total
@@ -780,7 +833,14 @@ class MarketRegimeSelector:
                         confidence = 0.3
 
         # ── 防抖保护：动态 confirm_bars（V3.0 置信度加权）─────────────────
-        if confidence >= self.confirm_fast_thresh:
+        # V5.1 突破快速通道 (Fast-Track)：BREAKOUT 不等待确认，立即切换
+        if regime == REGIME_BREAKOUT:
+            dynamic_confirm = 0
+            logger.info(
+                f"⚡ Breakout Fast-Track: regime={regime}, conf={confidence:.2f}, "
+                f"跳过 K 线确认，立即切换"
+            )
+        elif confidence >= self.confirm_fast_thresh:
             dynamic_confirm = self.confirm_bars_fast
         elif confidence <= self.confirm_slow_thresh:
             dynamic_confirm = self.confirm_bars_slow
@@ -798,7 +858,8 @@ class MarketRegimeSelector:
             self._pending_regime = regime
             self._pending_count  = 1
 
-        if self._pending_count >= dynamic_confirm:
+        # V5.1: dynamic_confirm=0 表示立即确认（Breakout Fast-Track）
+        if self._pending_count >= max(dynamic_confirm, 1) or dynamic_confirm == 0:
             if regime != self._confirmed_regime:
                 # V4.0: Regime 切换旧仓管理
                 self._prev_confirmed_regime = self._confirmed_regime
@@ -812,6 +873,14 @@ class MarketRegimeSelector:
                     f"链上={extra_regime}, MTF={mtf_regime})"
                 )
             self._confirmed_regime = regime
+        else:
+            # V5.1: 待定切换日志 — regime 已变但未达确认根数
+            if regime != self._confirmed_regime:
+                logger.info(
+                    f"⏳ 待定切换: {self._confirmed_regime} → {regime} "
+                    f"(已累计 {self._pending_count}/{dynamic_confirm} 根, "
+                    f"置信度={confidence:.2f})"
+                )
 
         final_regime = self._confirmed_regime
         strategy_name = self.strategy_map.get(final_regime, "")
