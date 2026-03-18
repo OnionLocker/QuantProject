@@ -72,7 +72,7 @@ class MarketRegimeSelector:
         self.adx_range_thresh = sc.get("adx_range_thresh", 18)   # ADX < 此值 = 震荡
         self.ema_short        = sc.get("ema_short",        14)
         self.ema_mid          = sc.get("ema_mid",          40)
-        self.ema_long         = sc.get("ema_long",        120)   # V5.1: BTC 1h 推荐 120 ≈ 5天
+        self.ema_long         = sc.get("ema_long",        80)    # V5.2: BTC 1h 推荐 80 ≈ 3.3天
         self.bb_period        = sc.get("bb_period",        20)
         self.bb_squeeze_pct   = sc.get("bb_squeeze_pct",   0.03) # 带宽/中轨 < 此值 = 挤压
 
@@ -95,7 +95,8 @@ class MarketRegimeSelector:
             REGIME_BEAR:     sc.get("strategy_bear",     "BEAR"),
             REGIME_RANGING:  sc.get("strategy_ranging",  "RANGE"),
             REGIME_BREAKOUT: sc.get("strategy_breakout", "BIG_CANDLE"),
-            REGIME_WAIT:     "",   # 观望状态不交易，返回空策略名
+            # V5.2: WAIT 不再返回空字符串（完全停工），而是使用震荡策略低仓位试探
+            REGIME_WAIT:     sc.get("strategy_wait", sc.get("strategy_ranging", "RANGE")),
         }
 
         # V1.5: 波动率快速检测参数
@@ -235,7 +236,7 @@ class MarketRegimeSelector:
 
         score    = 0.0   # 正 → 牛，负 → 熊，接近0 → 震荡
 
-        # ADX 趋势强度 (V5.0: BTC适配 - ADX贡献增大，低ADX惩罚减轻)
+        # ADX 趋势强度 (V5.2: BTC适配 - ADX 13~18 区间保留方向信号)
         if adx_val > self.adx_bull_thresh:
             adx_strength = min((adx_val - self.adx_bull_thresh) / 15, 1.0)  # 更快饱和
             # +DI 和 -DI 决定方向
@@ -243,12 +244,20 @@ class MarketRegimeSelector:
                 score += adx_strength * 2.5   # 趋势方向贡献增大
             else:
                 score -= adx_strength * 2.5
+        elif adx_val > self.adx_range_thresh:
+            # V5.2: ADX 在 range_thresh~bull_thresh 之间（13~18）
+            # 不再压制 score，仅给一个较弱的方向信号
+            weak_strength = (adx_val - self.adx_range_thresh) / (self.adx_bull_thresh - self.adx_range_thresh)
+            if pdi_val > mdi_val:
+                score += weak_strength * 0.8
+            else:
+                score -= weak_strength * 0.8
         else:
-            # ADX 低 → 轻微偏向震荡（减轻惩罚，BTC ADX 普遍偏低）
-            range_strength = min((self.adx_bull_thresh - adx_val) / 20, 1.0)
-            score *= (1 - range_strength * 0.3)  # 从0.5降到0.3，减少对方向信号的压制
+            # ADX 极低（< range_thresh）→ 轻微压制
+            range_strength = min((self.adx_range_thresh - adx_val) / 20, 1.0)
+            score *= (1 - range_strength * 0.3)
 
-        # EMA 排列 (V5.0: BTC适配 - 增加不完美排列的部分得分)
+        # EMA 排列 (V5.2: 增加更多部分得分层级)
         if es_val > em_val > el_val and close_j > el_val:
             # 多头排列：强烈看涨
             score += 1.5
@@ -261,6 +270,12 @@ class MarketRegimeSelector:
         elif es_val < em_val and close_j < em_val:
             # 不完美空头（快<中 + 价格在中线下）：部分看跌
             score -= 0.8
+        elif es_val > em_val and close_j > es_val:
+            # V5.2: 快线上方（价格站上快线，方向偏多）
+            score += 0.5
+        elif es_val < em_val and close_j < es_val:
+            # V5.2: 快线下方（价格跌破快线，方向偏空）
+            score -= 0.5
         elif abs(es_val - em_val) / em_val < 0.005:
             # EMA 几乎重合（收紧判定到0.5%）：震荡
             score *= 0.6
@@ -309,7 +324,7 @@ class MarketRegimeSelector:
             score *= 0.6   # 挤压期信号衰减（原0.3太激进，BTC挤压后常直接突破）
 
         # 决策
-        confidence = min(abs(score) / 4.0, 1.0)
+        confidence = min(abs(score) / 3.0, 1.0)  # V5.2: 从4.0降到3.0，更容易产生较高 confidence
 
         # V1.5: 波动率快速检测通道 ─────────────────────────────────────────
         # ATR 突然放大 = 市场状态可能在转换，优先识别
@@ -327,19 +342,20 @@ class MarketRegimeSelector:
                 else:
                     return REGIME_WAIT, 0.3
 
-        # V1.5: WAIT 观望状态 (V5.0: BTC适配 - 大幅收紧WAIT判定) ─────────
-        # 只有 ADX 在极窄模糊区间 且 score 几乎为零才观望
-        if (self.adx_range_thresh < adx_val <= self.adx_bull_thresh
-                and abs(score) < 0.5):
-            return REGIME_WAIT, 0.2
+        # V5.2: WAIT 仅在真正无信号时触发（ADX 极低 + score 近零）─────────
+        # 不再把 ADX 模糊区间(13~18)判为 WAIT，改为 RANGING（可交易）
+        # WAIT 仅在 ADX < range_thresh 且 score 几乎为零时触发
+        if adx_val <= self.adx_range_thresh and abs(score) < 0.3:
+            return REGIME_WAIT, 0.15
 
         # ADX 极强（>40）且价格在长期均线上方 → 强势突破 regime
         if adx_val > 40 and score >= 1.5:
             return REGIME_BREAKOUT, min(confidence * 1.2, 1.0)
-        # V5.0: BULL/BEAR 判定门槛从 1.5 降到 1.0，让更多行情分类为有方向
-        if score >= 1.0:
+        # V5.2: BULL/BEAR 门槛从 1.0 降到 0.6
+        # BTC 1h ADX 普遍偏低，score 很难到 1.0，导致长期 RANGING/WAIT
+        if score >= 0.6:
             return REGIME_BULL, confidence
-        elif score <= -1.0:
+        elif score <= -0.6:
             return REGIME_BEAR, confidence
         else:
             return REGIME_RANGING, confidence
@@ -482,10 +498,15 @@ class MarketRegimeSelector:
 
         # 4. MTF 方向确认
         if base_weights["mtf"] > 0:
+            # V5.2: 即使 final_regime != mtf_regime，只要 MTF 有方向就给部分分
+            # （WAIT/RANGING 不应浪费 MTF 的方向信号）
             if mtf_regime == final_regime:
                 mtf_score = base_weights["mtf"] * mtf_conf
+            elif final_regime in (REGIME_WAIT, REGIME_RANGING):
+                # WAIT/RANGING 模式下，MTF 有方向信号本身就是正面信息
+                mtf_score = base_weights["mtf"] * mtf_conf * 0.6
             else:
-                # MTF 方向冲突：不给分但也不扣分（旧版扣分导致低分）
+                # MTF 方向冲突：不给分
                 mtf_score = 0.0
         else:
             mtf_score = 0.0
@@ -496,7 +517,15 @@ class MarketRegimeSelector:
         valid_sources = [s for s in sources if s != REGIME_UNKNOWN]
         n_valid = len(valid_sources)
         if n_valid >= 2:
-            agree_count = sum(1 for s in valid_sources if s == final_regime)
+            # V5.2: 如果 final_regime 是 WAIT/RANGING，用"有方向的多数源"做一致性
+            compare_regime = final_regime
+            if final_regime in (REGIME_WAIT, REGIME_RANGING):
+                # 找有方向的源中最多的方向
+                directional = [s for s in valid_sources if s in (REGIME_BULL, REGIME_BEAR, REGIME_BREAKOUT)]
+                if directional:
+                    from collections import Counter
+                    compare_regime = Counter(directional).most_common(1)[0][0]
+            agree_count = sum(1 for s in valid_sources if s == compare_regime)
             agreement_ratio = agree_count / n_valid
             consistency_score = base_weights["consistency"] * agreement_ratio
             if agree_count >= 3:
@@ -768,8 +797,10 @@ class MarketRegimeSelector:
                 effective_mtf_weight *= scale
 
         # 技术面投票
+        # V5.2: WAIT 不直接投票（避免 WAIT 黑洞），转为 RANGING 投票
         if tech_regime != REGIME_UNKNOWN:
-            votes[tech_regime] += effective_tech_weight * (0.5 + tech_conf * 0.5)
+            vote_regime = REGIME_RANGING if tech_regime == REGIME_WAIT else tech_regime
+            votes[vote_regime] += effective_tech_weight * (0.5 + tech_conf * 0.5)
 
         # 新闻面投票（V2.0: 可能使用动态权重）
         actual_news_weight = self.last_regime_detail.get("dynamic_news_weight", effective_news_weight)
@@ -957,8 +988,8 @@ class MarketRegimeSelector:
         self._bars_since_switch += 1
         self.in_transition = (self._bars_since_switch <= self._transition_bars)
 
-        # WAIT 状态或无策略推荐 → 不交易
-        if not name or result["regime"] == REGIME_WAIT:
+        # WAIT 状态或无策略推荐 → V5.2: WAIT 有策略名了，仅 name 为空才跳过
+        if not name:
             logger.info(f"📋 观望状态: {result['reason']}")
             return None, result
 

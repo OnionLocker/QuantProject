@@ -27,9 +27,9 @@ selector:
   adx_range_thresh: 13         # V5.0: 从16降到13，更少行情被判为震荡
   ema_short:        10         # V5.0: 从12降到10，更灵敏
   ema_mid:          30         # V5.0: 从36降到30，提升反应速度
-  ema_long:         120        # V5.1: 从80提到120，对应5天趋势线，过滤小周期噪音
+  ema_long:         80         # V5.2: 从120降到80（3.3天趋势线），更适合BTC 1h节奏
   bb_period:        20
-  bb_squeeze_pct:   0.04       # V5.0: 从0.035提到0.04，更容易识别挤压
+  bb_squeeze_pct:   0.03       # V5.2: 从0.04降到0.03，减少误判挤压的概率
 
   # 权重配置 (V5.0: 技术面权重最大化)
   tech_weight:      1.0
@@ -65,7 +65,7 @@ selector:
   # V4.0: 多时间框架确认 (V5.0: 降低MTF压制)
   mtf_enable:        true
   mtf_ema_period:    30        # V5.0: 从34降到30
-  mtf_weight:        0.06      # V5.0: 从0.10降到0.06，减少高时间框架压制
+  mtf_weight:        0.12      # V5.2: 从0.06提到0.12，MTF有方向时应该有更大话语权
 
   # V4.0: VWAP 偏离度 (V5.0: 放宽均值回归压力)
   vwap_period:       20
@@ -76,8 +76,8 @@ selector:
   dynamic_veto_pctile:  95     # V5.0: 从92提高到95，更少触发否决
 
   # V4.0: 信号质量评分阈值 (V5.0: 大幅降低门槛)
-  signal_quality_full:  40     # V5.1: 保持40
-  signal_quality_half:  20     # V5.1: 从25降到20，配合归一化评分
+  signal_quality_full:  30     # V5.2: 从40降到30，匹配新评分逻辑
+  signal_quality_half:  15     # V5.2: 从20降到15
 
   # 各策略的参数覆盖 (V5.0: BTC 1h 盈利导向优化)
   strategy_params:

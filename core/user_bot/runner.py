@@ -61,8 +61,8 @@ _KLINE_WARMUP_MULTIPLIER:   int = 2     # 预热期乘数
 _KLINE_WARMUP_EXTRA:        int = 10    # 预热期额外条数
 _LOW_WIN_RATE_THRESHOLD:  float = 0.35  # 策略降权胜率阈值
 _LOW_WIN_RATE_SCALE:      float = 0.6   # 低胜率策略仓位缩放
-_LOW_SIGNAL_QUALITY_SKIP:   int = 25    # V5.0: 从40降到25，信号质量低于此值不开仓
-_MID_SIGNAL_QUALITY:        int = 45    # V5.0: 从60降到45，中等信号质量阈值
+_LOW_SIGNAL_QUALITY_SKIP:   int = 15    # V5.2: 从25降到15，仅极差信号才完全跳过
+_MID_SIGNAL_QUALITY:        int = 35    # V5.2: 从45降到35，中等信号质量阈值
 _MIN_SIGNAL_QUALITY_SCALE: float = 0.5  # V5.0: 从0.4提升到0.5，最低信号质量缩放
 _SL_TIGHTEN_RATIO:        float = 0.5   # Regime切换时SL收紧比例
 _TIME_STOP_FORCE_MULT:    float = 1.5   # 强制时间止损超时倍数
@@ -1107,13 +1107,23 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 # V4.0: Regime 切换旧仓管理
                 state = _handle_regime_transition(p, state, regime_result, current_price)
 
-                # V1.5: WAIT 观望
+                # V5.2: WAIT 不再硬跳过开仓
+                # 如果信号质量 >= 15 且策略给出了信号，允许降仓尝试开仓
+                # 只有信号质量极低（< 15）时才真正跳过
                 if regime_result.get("regime") == "wait" and state["position_amount"] == 0:
-                    p.logger.info(
-                        f"{p.tag} 📋 WAIT 观望，跳过开仓 ({regime_result['reason']})"
-                    )
-                    p.stop_ev.wait(p.interval)
-                    continue
+                    sq = regime_result.get("signal_quality", 0)
+                    if sq < _LOW_SIGNAL_QUALITY_SKIP:
+                        p.logger.info(
+                            f"{p.tag} 📋 WAIT 观望（质量={sq:.0f} < {_LOW_SIGNAL_QUALITY_SKIP}），"
+                            f"跳过开仓 ({regime_result['reason']})"
+                        )
+                        p.stop_ev.wait(p.interval)
+                        continue
+                    else:
+                        p.logger.info(
+                            f"{p.tag} 📋 WAIT 但信号质量={sq:.0f}≥{_LOW_SIGNAL_QUALITY_SKIP}，"
+                            f"允许降仓尝试 ({regime_result['reason']})"
+                        )
 
                 # V4.0: 日内交易次数检查
                 if p.rm.daily_trades_exhausted and state["position_amount"] == 0:

@@ -168,7 +168,9 @@ class RiskManager:
             # 刚发生方向性 regime 切换，风险最高
             self._regime_risk_mult = 0.5
         elif regime == "wait":
-            self._regime_risk_mult = 0.0  # WAIT 不开仓
+            # V5.2: WAIT 不再完全封死（0.0），改为半仓试探
+            # 让策略有机会在 WAIT 期间低仓位尝试
+            self._regime_risk_mult = 0.4
         elif confidence < 0.4:
             self._regime_risk_mult = 0.6
         elif confidence < 0.7:
