@@ -25,7 +25,17 @@ sys.path.append(project_root)
 
 def _get_public_exchange():
     import ccxt
-    return ccxt.okx({"enableRateLimit": True})
+    ex = ccxt.okx({"enableRateLimit": True})
+    # V5.2: 安全 load_markets，防止 OKX 返回 base=None 的交易对导致 TypeError
+    try:
+        ex.load_markets()
+    except TypeError as e:
+        if "NoneType" in str(e):
+            from api.routes.keys import _safe_load_markets
+            _safe_load_markets(ex)
+        else:
+            raise
+    return ex
 
 
 # ── 缓存辅助 ─────────────────────────────────────────────────────────────────
