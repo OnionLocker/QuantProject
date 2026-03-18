@@ -93,6 +93,7 @@ def validate_key(user=Depends(get_current_user)):
             "enableRateLimit": True,
         })
         ex.set_sandbox_mode(sandbox)
+        _patch_parse_market(ex)  # V5.2b: 防御 base=None
         return ex
 
     def _probe(ex):
@@ -245,8 +246,7 @@ def get_user_exchange(user_id: int):
     根据用户 ID 从数据库取出 API Key，构建 ccxt OKX 实例。
     使用 per-user TTL 缓存复用实例，避免频繁创建 + 交易所限频风险。
 
-    V5.2 fix: 预先调用 load_markets() 并用 safe wrapper 处理 OKX 返回
-    某些交易对 base=None 导致 parse_market 抛 TypeError 的问题。
+    V5.2b fix: 永久 monkey-patch parse_market，全生命周期防御 base=None。
     """
     import ccxt
     import logging as _logging
@@ -275,26 +275,15 @@ def get_user_exchange(user_id: int):
     })
     ex.set_sandbox_mode(bool(row["is_simulate"]))
 
-    # ── V5.2 fix: 安全 load_markets ────────────────────────────────────────
-    # ccxt 在首次 API 调用时会隐式 load_markets()。
-    # OKX 返回的某些交易对 base 为 None，导致 parse_market() 中
-    # `symbol = base + '/' + quote` 抛出 TypeError。
-    # 解决：预先 load_markets()，如果遇到 TypeError 则 monkey-patch
-    # parse_market 跳过异常交易对。
+    # ── V5.2b: 永久 patch parse_market，全生命周期防御 ──────────────────────
+    _patch_parse_market(ex)
+
+    # ── 预加载 markets（patch 后不会再崩）──────────────────────────────────
     try:
         ex.load_markets()
-    except TypeError as e:
-        if "NoneType" in str(e) and "+" in str(e):
-            _log.warning(
-                "ccxt load_markets() 遇到 OKX 返回了 base=None 的交易对，"
-                "启用 safe_parse_market 修补..."
-            )
-            _safe_load_markets(ex)
-        else:
-            raise
-    except Exception:
-        # 网络错误等不阻断，让后续调用自动重试
-        _log.warning("load_markets() 预加载失败，后续调用将自动重试")
+        _log.info(f"load_markets 成功: {len(ex.markets)} 个交易对")
+    except Exception as e:
+        _log.warning(f"load_markets 预加载失败（后续调用将自动重试）: {e}")
 
     with _exchange_cache_lock:
         _exchange_cache[user_id] = {"ex": ex, "ts": now}
@@ -302,68 +291,52 @@ def get_user_exchange(user_id: int):
     return ex
 
 
-def _safe_load_markets(ex):
+def _patch_parse_market(ex):
     """
-    安全版 load_markets：monkey-patch parse_market 跳过 base/quote 为 None 的交易对。
-    解决 ccxt OKX 适配 bug: 某些交易对（如已退市合约）缺少 base 字段。
+    永久 monkey-patch ccxt exchange 实例的 parse_market 方法。
+
+    问题：ccxt 4.x OKX 适配中，某些交易对（已退市/测试合约/OPTION 类）
+    的 base 或 quote 解析为 None，导致 parse_market() 中
+    `symbol = base + '/' + quote` 抛出 TypeError。
+
+    方案：包装 parse_market，捕获 TypeError 返回 None，
+    同时包装 fetch_markets/load_markets 过滤掉 None 结果。
+    这是永久 patch，不恢复原始方法，确保 create_order/fetch_ticker 等
+    后续操作中如果触发 re-parse 也不会崩溃。
     """
     import logging as _logging
-    _log = _logging.getLogger("safe_load_markets")
+    _log = _logging.getLogger("patch_parse_market")
+
+    # 避免重复 patch
+    if getattr(ex, '_parse_market_patched', False):
+        return
+    ex._parse_market_patched = True
 
     _original_parse_market = ex.parse_market
 
-    def _patched_parse_market(market, *args, **kwargs):
-        # 预检查：如果 base 或 quote 信息缺失，跳过该交易对
-        info = market if isinstance(market, dict) else {}
-        # OKX 原始字段: baseCcy / quoteCcy
-        base_ccy = info.get("baseCcy") or info.get("base") or info.get("baseCurrency")
-        quote_ccy = info.get("quoteCcy") or info.get("quote") or info.get("quoteCurrency")
-        if not base_ccy or not quote_ccy:
-            inst_id = info.get("instId", "unknown")
-            _log.debug(f"跳过无效交易对: {inst_id} (base={base_ccy}, quote={quote_ccy})")
-            return None
-        return _original_parse_market(market, *args, **kwargs)
+    def _safe_parse_market(market, *args, **kwargs):
+        try:
+            result = _original_parse_market(market, *args, **kwargs)
+            return result
+        except TypeError as e:
+            if "NoneType" in str(e):
+                inst_id = (market or {}).get("instId", "unknown") if isinstance(market, dict) else "unknown"
+                _log.debug(f"parse_market 跳过无效交易对 {inst_id}: {e}")
+                return None
+            raise
 
-    ex.parse_market = _patched_parse_market
+    ex.parse_market = _safe_parse_market
 
-    try:
-        # 重新拉取市场数据（使用 raw API 避免再触发 parse_market）
-        # 直接调用底层方法绕过 ccxt 的自动解析
-        responses = {}
-        for market_type in ['spot', 'swap', 'futures', 'option']:
-            try:
-                resp = ex.publicGetPublicInstruments({"instType": market_type.upper()})
-                instruments = (resp or {}).get("data") or []
-                responses[market_type] = instruments
-            except Exception:
-                continue
-
-        # 手动构建 markets
-        ex.markets = {}
-        ex.markets_by_id = {}
-        ex.symbols = []
-
-        for market_type, instruments in responses.items():
-            for instrument in instruments:
-                try:
-                    parsed = _original_parse_market(instrument)
-                    if parsed and parsed.get("symbol"):
-                        symbol = parsed["symbol"]
-                        ex.markets[symbol] = parsed
-                        market_id = parsed.get("id", "")
-                        if market_id:
-                            ex.markets_by_id[market_id] = parsed
-                        ex.symbols.append(symbol)
-                except (TypeError, KeyError, AttributeError) as e:
-                    inst_id = instrument.get("instId", "unknown")
-                    _log.debug(f"跳过解析失败的交易对 {inst_id}: {e}")
-                    continue
-
-        _log.info(f"safe_load_markets 完成: {len(ex.markets)} 个交易对加载成功")
-
-    except Exception as e:
-        _log.error(f"safe_load_markets 失败: {e}")
-        raise
-    finally:
-        # 恢复原始 parse_market
-        ex.parse_market = _original_parse_market
+    # ── 同时 patch fetch_markets，过滤掉 parse_market 返回的 None ──────────
+    _original_fetch_markets = getattr(ex, 'fetch_markets', None)
+    if _original_fetch_markets:
+        def _safe_fetch_markets(*args, **kwargs):
+            markets = _original_fetch_markets(*args, **kwargs)
+            if isinstance(markets, list):
+                before = len(markets)
+                markets = [m for m in markets if m is not None]
+                skipped = before - len(markets)
+                if skipped > 0:
+                    _log.info(f"fetch_markets: 过滤了 {skipped} 个无效交易对")
+            return markets
+        ex.fetch_markets = _safe_fetch_markets
