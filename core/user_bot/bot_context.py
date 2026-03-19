@@ -64,6 +64,15 @@ def empty_state() -> dict:
         "trailing_stop_best_price": 0.0,
         # V2.5: 时间止损
         "entry_bar_count": 0,
+        # V7.0: 平仓后冷静期
+        "last_close_time": "",          # 上次平仓时间
+        "last_close_reason": "",        # 上次平仓原因
+        "last_close_pnl": 0.0,         # 上次平仓盈亏
+        "last_close_side": "",          # 上次平仓方向 ("long" / "short")
+        "cooldown_until": "",           # 冷静期截止时间
+        "cooldown_bars_remaining": 0,   # 冷静期剩余 K 线数
+        "spike_detected_time": "",      # 最近插针检测时间
+        "spike_cooldown_until": "",     # 插针冷静期截止时间
     }
 
 

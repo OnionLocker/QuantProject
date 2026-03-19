@@ -52,6 +52,16 @@ def status(user=Depends(get_current_user)):
             "entry_time":  ps.get("entry_time", ""),
             "strategy":    ps.get("strategy_name", ""),
             "reason":      ps.get("signal_reason", ""),
+        },
+        # V7.0: 冷静期状态
+        "cooldown": {
+            "active":           ps.get("cooldown_bars_remaining", 0) > 0,
+            "bars_remaining":   ps.get("cooldown_bars_remaining", 0),
+            "last_close_time":  ps.get("last_close_time", ""),
+            "last_close_reason": ps.get("last_close_reason", ""),
+            "last_close_pnl":   ps.get("last_close_pnl", 0),
+            "last_close_side":  ps.get("last_close_side", ""),
+            "spike_cooldown_until": ps.get("spike_cooldown_until", ""),
         }
     }
 

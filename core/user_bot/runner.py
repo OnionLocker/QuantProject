@@ -493,6 +493,13 @@ class _RunParams:
         'use_auto', 'selector', 'strategy',
         'trailing_stop_enable', 'trailing_stop_trigger', 'trailing_stop_distance',
         'time_stop_bars', 'time_stop_enable', 'dynamic_position_enable',
+        # V7.0: 平仓冷静期 & 插针过滤
+        'post_close_cooldown_bars', 'post_stoploss_cooldown_bars',
+        'post_passive_cooldown_bars', 'post_takeprofit_cooldown_bars',
+        'spike_detect_enable', 'spike_atr_mult', 'spike_wick_ratio',
+        'spike_cooldown_bars', 'spike_body_max_ratio',
+        'reentry_volatility_settle_mult', 'reentry_require_stable_bars',
+        'reentry_same_direction_block',
     )
 
 
@@ -592,7 +599,8 @@ def _handle_passive_close(
             f"估算盈亏: <b>~{net_pnl:+.2f} U</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📋 状态: <b>待交易所对账</b>\n"
-            f"系统将自动重查，拿到真实成交后会再次通知"
+            f"系统将自动重查，拿到真实成交后会再次通知\n"
+            f"🧊 已进入冷静期，不会立即重新开仓"
         )
     else:
         # ── 真实成交：正式展示 ────────────────────────────────────────────
@@ -602,7 +610,8 @@ def _handle_passive_close(
             f"入场价: {entry_price:.2f} → 出场价: {fill_info.fill_price:.2f}\n"
             f"止损: {state['active_sl']:.2f} | 止盈: {state['active_tp1']:.2f}\n"
             f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-            f"来源: ✅ {fill_info.fill_source}"
+            f"来源: ✅ {fill_info.fill_source}\n"
+            f"🧊 已进入冷静期，不会立即重新开仓"
         )
 
     if p.rm.is_fused:
@@ -612,8 +621,18 @@ def _handle_passive_close(
             f"恢复请在控制台点击「恢复熔断」。"
         )
 
+    # V7.0: 保存平仓信息用于冷静期
+    _close_side = state["position_side"]
+    _close_reason = fill_info.exit_reason
+
     clear_state(p.user_id)
-    return load_state(p.user_id)
+    new_state = load_state(p.user_id)
+
+    # V7.0: 在清空后的 state 中写入冷静期
+    _set_post_close_cooldown(p, new_state, _close_reason, _close_side, net_pnl)
+    save_state(p.user_id, new_state)
+
+    return new_state
 
 
 # ── 子流程：Regime 切换旧仓管理 ───────────────────────────────────────────────
@@ -698,6 +717,13 @@ def _handle_regime_transition(
         )
         clear_state(p.user_id)
         state = load_state(p.user_id)
+        # V7.0: Regime 切换平仓也设冷静期
+        _r_close_side = "long" if is_long else "short"
+        _set_post_close_cooldown(
+            p, state, f"Regime切换: {transition_action}",
+            _r_close_side, net_pnl
+        )
+        save_state(p.user_id, state)
     except Exception as e:
         p.logger.error(f"{p.tag} ⚠️ Regime切换平仓失败: {e}")
         p.notify(
@@ -746,6 +772,315 @@ def _tighten_sl_on_regime_switch(p: _RunParams, state: dict, is_long: bool) -> d
     return state
 
 
+# ── V7.0: 插针/异常波动检测 ──────────────────────────────────────────────────
+
+def _detect_spike(df, p: _RunParams) -> dict:
+    """
+    V7.0: 检测最近 K 线是否存在插针/异常波动。
+
+    检测逻辑：
+      1. 单根 K 线振幅 > ATR × spike_atr_mult → 异常大振幅
+      2. 上下影线占比 > spike_wick_ratio → 典型插针（实体小、影线长）
+      3. ATR 突增（当前 ATR > 近期均值 × spike_atr_mult）→ 波动率飙升
+
+    返回: {
+        "is_spike": bool,
+        "spike_bars": list[int],    # 哪些 K 线被判定为插针
+        "spike_type": str,          # "wick_spike" / "atr_surge" / "both"
+        "severity": float,          # 0~1, 严重程度
+        "detail": str,              # 人可读描述
+    }
+    """
+    result = {
+        "is_spike": False,
+        "spike_bars": [],
+        "spike_type": "",
+        "severity": 0.0,
+        "detail": "",
+    }
+
+    if not p.spike_detect_enable or df is None or len(df) < 30:
+        return result
+
+    c = df['close']
+    h = df['high']
+    l = df['low']
+    o = df['open']
+    prev_c = c.shift(1)
+    tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+
+    # 检查最近 3 根已完结 K 线
+    spike_bars = []
+    max_severity = 0.0
+    spike_types = set()
+
+    for offset in [-2, -3, -4]:
+        if abs(offset) >= len(df):
+            continue
+        idx = offset
+        try:
+            bar_range = float(h.iloc[idx] - l.iloc[idx])
+            bar_atr = float(atr.iloc[idx])
+            bar_close = float(c.iloc[idx])
+            bar_open = float(o.iloc[idx])
+            bar_high = float(h.iloc[idx])
+            bar_low = float(l.iloc[idx])
+        except (IndexError, ValueError):
+            continue
+
+        if bar_atr <= 0 or bar_range <= 0:
+            continue
+
+        # 检查1: 振幅异常大
+        range_ratio = bar_range / bar_atr
+        if range_ratio > p.spike_atr_mult:
+            spike_types.add("atr_surge")
+            severity = min(1.0, (range_ratio - p.spike_atr_mult) / p.spike_atr_mult)
+            max_severity = max(max_severity, severity)
+            spike_bars.append(offset)
+
+        # 检查2: 插针形态（影线长、实体小）
+        body = abs(bar_close - bar_open)
+        body_ratio = body / bar_range if bar_range > 0 else 1.0
+
+        upper_wick = bar_high - max(bar_close, bar_open)
+        lower_wick = min(bar_close, bar_open) - bar_low
+        max_wick = max(upper_wick, lower_wick)
+        wick_ratio = max_wick / bar_range if bar_range > 0 else 0.0
+
+        if (wick_ratio > p.spike_wick_ratio and
+                body_ratio < p.spike_body_max_ratio):
+            spike_types.add("wick_spike")
+            severity = min(1.0, wick_ratio)
+            max_severity = max(max_severity, severity)
+            if offset not in spike_bars:
+                spike_bars.append(offset)
+
+    if spike_bars:
+        result["is_spike"] = True
+        result["spike_bars"] = spike_bars
+        result["severity"] = max_severity
+        if len(spike_types) >= 2:
+            result["spike_type"] = "both"
+        elif "wick_spike" in spike_types:
+            result["spike_type"] = "wick_spike"
+        else:
+            result["spike_type"] = "atr_surge"
+        result["detail"] = (
+            f"检测到{len(spike_bars)}根异常K线: "
+            f"类型={result['spike_type']}, 严重度={max_severity:.2f}"
+        )
+
+    return result
+
+
+def _check_reentry_volatility(df, p: _RunParams) -> tuple[bool, str]:
+    """
+    V7.0: 检查当前波动率是否已回落到可接受水平。
+
+    返回: (is_settled, detail_str)
+      - is_settled=True: 波动率已回落，可以考虑开仓
+      - is_settled=False: 波动率仍然偏高，建议等待
+    """
+    if df is None or len(df) < 30:
+        return True, ""
+
+    c = df['close']
+    h = df['high']
+    l = df['low']
+    prev_c = c.shift(1)
+    tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+
+    try:
+        current_atr = float(atr.iloc[-2])
+        baseline_atr = float(atr.iloc[-20:-2].mean())
+    except (IndexError, ValueError):
+        return True, ""
+
+    if baseline_atr <= 0:
+        return True, ""
+
+    atr_ratio = current_atr / baseline_atr
+
+    if atr_ratio > p.reentry_volatility_settle_mult:
+        return False, (
+            f"波动率仍偏高: 当前ATR/基准ATR={atr_ratio:.2f} "
+            f"> 阈值{p.reentry_volatility_settle_mult:.1f}"
+        )
+
+    # 检查最近 N 根 K 线是否稳定（无极端波动）
+    n_stable = p.reentry_require_stable_bars
+    for i in range(-2, -2 - n_stable, -1):
+        if abs(i) >= len(df):
+            continue
+        try:
+            bar_range = float(h.iloc[i] - l.iloc[i])
+            bar_atr = float(atr.iloc[i])
+        except (IndexError, ValueError):
+            continue
+        if bar_atr > 0 and bar_range / bar_atr > p.spike_atr_mult * 0.8:
+            return False, (
+                f"最近K线仍有异常波动: bar[{i}] 振幅/ATR={bar_range/bar_atr:.2f}"
+            )
+
+    return True, f"波动率已回落: ATR比率={atr_ratio:.2f}"
+
+
+def _check_cooldown_and_reentry(
+    p: _RunParams, state: dict, signal: dict, df,
+) -> tuple[bool, str]:
+    """
+    V7.0: 开仓前的综合门禁检查。
+
+    检查顺序：
+      1. 平仓后冷静期（基于 K 线数）
+      2. 插针冷静期（基于时间）
+      3. 同方向追击抑制
+      4. 波动率回落确认
+      5. 插针实时检测
+
+    返回: (can_open, reason)
+      - can_open=True: 允许开仓
+      - can_open=False: 拒绝开仓, reason 说明拒绝原因
+    """
+    now = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    # ── 1. 平仓后冷静期（K 线计数）──────────────────────────────────────────
+    cooldown_remaining = state.get("cooldown_bars_remaining", 0)
+    if cooldown_remaining > 0:
+        last_reason = state.get("last_close_reason", "")
+        return False, (
+            f"🧊 平仓冷静期中: 剩余{cooldown_remaining}根K线 "
+            f"(上次: {last_reason})"
+        )
+
+    # ── 2. 插针冷静期（时间窗口）─────────────────────────────────────────────
+    spike_cooldown_str = state.get("spike_cooldown_until", "")
+    if spike_cooldown_str:
+        try:
+            spike_until = datetime.strptime(spike_cooldown_str, "%Y-%m-%d %H:%M:%S")
+            if now < spike_until:
+                remaining_min = (spike_until - now).total_seconds() / 60
+                return False, (
+                    f"🧊 插针冷静期中: 还需等待{remaining_min:.0f}分钟 "
+                    f"(检测到异常波动)"
+                )
+        except (ValueError, TypeError):
+            pass
+
+    # ── 3. 同方向追击抑制 ────────────────────────────────────────────────────
+    if p.reentry_same_direction_block:
+        last_side = state.get("last_close_side", "")
+        last_close_time_str = state.get("last_close_time", "")
+        if last_side and last_close_time_str:
+            try:
+                last_close_dt = datetime.strptime(last_close_time_str, "%Y-%m-%d %H:%M:%S")
+                # 在最近 2 根 K 线内（2h for 1h tf），禁止同方向追击
+                hours_since = (now - last_close_dt).total_seconds() / 3600
+                if hours_since < 2:
+                    sig_action = signal.get("action", "")
+                    sig_dir = "long" if sig_action == "BUY" else "short" if sig_action == "SELL" else ""
+                    if sig_dir == last_side:
+                        return False, (
+                            f"🧊 同方向追击抑制: 上次{last_side}平仓仅过{hours_since:.1f}h, "
+                            f"禁止同方向立即重开"
+                        )
+            except (ValueError, TypeError):
+                pass
+
+    # ── 4. 波动率回落确认 ─────────────────────────────────────────────────────
+    last_close_time_str = state.get("last_close_time", "")
+    if last_close_time_str:
+        try:
+            last_close_dt = datetime.strptime(last_close_time_str, "%Y-%m-%d %H:%M:%S")
+            hours_since = (now - last_close_dt).total_seconds() / 3600
+            # 仅在最近 6 小时内的平仓后检查波动率
+            if hours_since < 6:
+                settled, vol_detail = _check_reentry_volatility(df, p)
+                if not settled:
+                    return False, f"🧊 再入场等待波动率回落: {vol_detail}"
+        except (ValueError, TypeError):
+            pass
+
+    # ── 5. 实时插针检测 ───────────────────────────────────────────────────────
+    spike_info = _detect_spike(df, p)
+    if spike_info["is_spike"]:
+        # 设置插针冷静期
+        from datetime import timedelta
+        # 根据 timeframe 计算冷静时间
+        tf_minutes = _timeframe_to_minutes(p.timeframe)
+        cooldown_minutes = p.spike_cooldown_bars * tf_minutes
+        spike_until = now + timedelta(minutes=cooldown_minutes)
+        state["spike_detected_time"] = now_str
+        state["spike_cooldown_until"] = spike_until.strftime("%Y-%m-%d %H:%M:%S")
+        save_state(p.user_id, state)
+        return False, (
+            f"🧊 检测到插针/异常波动: {spike_info['detail']}, "
+            f"进入冷静期{cooldown_minutes}分钟"
+        )
+
+    return True, ""
+
+
+def _set_post_close_cooldown(
+    p: _RunParams, state: dict,
+    close_reason: str, close_side: str, net_pnl: float,
+):
+    """
+    V7.0: 平仓后在 state 中写入冷静期信息。
+    根据平仓类型选择不同的冷静期长度。
+    """
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state["last_close_time"] = now_str
+    state["last_close_reason"] = close_reason
+    state["last_close_pnl"] = net_pnl
+    state["last_close_side"] = close_side
+
+    # 根据平仓原因选择冷静期长度
+    reason_lower = close_reason.lower()
+    if "止损" in close_reason or "stoploss" in reason_lower:
+        cooldown_bars = p.post_stoploss_cooldown_bars
+    elif "止盈" in close_reason or "takeprofit" in reason_lower:
+        cooldown_bars = p.post_takeprofit_cooldown_bars
+    elif "被动" in close_reason or "托管" in close_reason or "passive" in reason_lower:
+        cooldown_bars = p.post_passive_cooldown_bars
+    else:
+        cooldown_bars = p.post_close_cooldown_bars
+
+    state["cooldown_bars_remaining"] = cooldown_bars
+
+    p.logger.info(
+        f"{p.tag} 🧊 设置平仓冷静期: {cooldown_bars}根K线 "
+        f"(原因={close_reason}, 方向={close_side})"
+    )
+
+
+def _tick_cooldown(state: dict):
+    """
+    V7.0: 每轮主循环调用，递减冷静期剩余 K 线计数。
+    """
+    remaining = state.get("cooldown_bars_remaining", 0)
+    if remaining > 0:
+        state["cooldown_bars_remaining"] = remaining - 1
+
+
+def _timeframe_to_minutes(tf: str) -> int:
+    """将 timeframe 字符串转为分钟数。"""
+    tf = tf.lower().strip()
+    if tf.endswith('m'):
+        return int(tf[:-1])
+    elif tf.endswith('h'):
+        return int(tf[:-1]) * 60
+    elif tf.endswith('d'):
+        return int(tf[:-1]) * 1440
+    elif tf.endswith('w'):
+        return int(tf[:-1]) * 10080
+    return 60  # 默认 1h
+
+
 # ── 子流程：开仓 ──────────────────────────────────────────────────────────────
 
 def _handle_open_position(
@@ -757,9 +1092,16 @@ def _handle_open_position(
     返回更新后的 state；若未开仓则返回 None。
 
     V5.1: 拒绝理由透明化 — 所有跳过开仓的分支都输出具体数值对比。
+    V7.0: 平仓冷静期 + 插针过滤 + 再入场门禁。
     """
     action = signal["action"]
     if state["position_amount"] != 0 or action not in ("BUY", "SELL"):
+        return None
+
+    # ── V7.0: 冷静期 & 再入场门禁 ────────────────────────────────────────────
+    can_open, block_reason = _check_cooldown_and_reentry(p, state, signal, df)
+    if not can_open:
+        p.logger.info(f"{p.tag} ❌ 拒绝开仓（冷静期/波动过滤）: {block_reason}")
         return None
 
     reason    = signal["reason"]
@@ -1128,6 +1470,11 @@ def _execute_close(
     clear_state(p.user_id)
     new_state = load_state(p.user_id)
 
+    # V7.0: 写入冷静期
+    _close_side = "long" if is_long else "short"
+    _set_post_close_cooldown(p, new_state, close_reason, _close_side, net_pnl)
+    save_state(p.user_id, new_state)
+
     pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
     _side_label = "多" if is_long else "空"
     p.notify(
@@ -1396,6 +1743,20 @@ def run_user_bot(bot_state, override_strategy: str = None):
     p.time_stop_enable       = v25_cfg.get("time_stop_enable", True)
     p.dynamic_position_enable = v25_cfg.get("dynamic_position_enable", True)
 
+    # V7.0: 平仓冷静期 & 插针过滤参数
+    p.post_close_cooldown_bars      = v25_cfg.get("post_close_cooldown_bars", 3)
+    p.post_stoploss_cooldown_bars   = v25_cfg.get("post_stoploss_cooldown_bars", 4)
+    p.post_passive_cooldown_bars    = v25_cfg.get("post_passive_cooldown_bars", 4)
+    p.post_takeprofit_cooldown_bars = v25_cfg.get("post_takeprofit_cooldown_bars", 2)
+    p.spike_detect_enable           = v25_cfg.get("spike_detect_enable", True)
+    p.spike_atr_mult                = v25_cfg.get("spike_atr_mult", 2.5)
+    p.spike_wick_ratio              = v25_cfg.get("spike_wick_ratio", 0.65)
+    p.spike_cooldown_bars           = v25_cfg.get("spike_cooldown_bars", 3)
+    p.spike_body_max_ratio          = v25_cfg.get("spike_body_max_ratio", 0.35)
+    p.reentry_volatility_settle_mult = v25_cfg.get("reentry_volatility_settle_mult", 1.5)
+    p.reentry_require_stable_bars   = v25_cfg.get("reentry_require_stable_bars", 2)
+    p.reentry_same_direction_block  = v25_cfg.get("reentry_same_direction_block", True)
+
     p.notify(
         f"🚀 <b>{p.username} 的 Bot 已启动</b>\n"
         f"策略: {p.cfg['strategy_name']} | 品种: {p.symbol} | 杠杆: {p.leverage}x"
@@ -1514,6 +1875,21 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
             # ── K 线 & 信号 ───────────────────────────────────────────────
             df, current_price = _fetch_kline_df(p, p.strategy)
+
+            # ── V7.0: 冷静期递减 ──────────────────────────────────────────
+            if state["position_amount"] == 0:
+                old_remaining = state.get("cooldown_bars_remaining", 0)
+                _tick_cooldown(state)
+                new_remaining = state.get("cooldown_bars_remaining", 0)
+                if old_remaining > 0:
+                    if new_remaining > 0:
+                        p.logger.info(
+                            f"{p.tag} 🧊 冷静期: 剩余{new_remaining}根K线 "
+                            f"(上次平仓: {state.get('last_close_reason', '')})"
+                        )
+                    else:
+                        p.logger.info(f"{p.tag} ✅ 冷静期结束，恢复正常交易评估")
+                    save_state(p.user_id, state)
 
             # ── AUTO 模式：每轮评估市场状态 ───────────────────────────────
             if p.use_auto and p.selector is not None:

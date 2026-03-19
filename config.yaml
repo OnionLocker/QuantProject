@@ -185,3 +185,21 @@ risk_v25:
   # V4.0: 每日最大交易次数限制（防止过度交易）
   max_daily_trades:  8                # 每日最多开仓 8 次
 
+  # V7.0: 平仓后冷静期（防止插针后快速再开仓）
+  post_close_cooldown_bars:    3      # 任何平仓后至少等待 N 根K线（1h → 3小时）
+  post_stoploss_cooldown_bars: 4      # 止损平仓后等待 N 根K线（1h → 4小时）
+  post_passive_cooldown_bars:  4      # 被动平仓（SL/TP/托管单）后等待 N 根K线
+  post_takeprofit_cooldown_bars: 2    # 止盈平仓后等待 N 根K线（可以更短）
+
+  # V7.0: 插针/异常波动过滤
+  spike_detect_enable: true           # 是否启用插针检测
+  spike_atr_mult:      2.5            # 单根K线振幅 > ATR × 此值 = 插针
+  spike_wick_ratio:    0.65           # 上下影线占比 > 此值 = 典型插针（影线/(高-低)）
+  spike_cooldown_bars: 3              # 插针后冷静期 K 线数（1h → 3小时）
+  spike_body_max_ratio: 0.35          # 实体占比 < 此值时配合 wick_ratio 判定插针
+
+  # V7.0: 再入场确认（平仓后重新开仓需要更强的信号确认）
+  reentry_volatility_settle_mult: 1.5 # 再入场时要求当前ATR < 近期均值 × 此倍数（波动率回落）
+  reentry_require_stable_bars:   2    # 再入场前要求连续 N 根 K 线稳定（无极端波动）
+  reentry_same_direction_block:  true # 是否禁止同方向快速反复追击
+
