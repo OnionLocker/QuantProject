@@ -1102,6 +1102,15 @@ def _handle_open_position(
     can_open, block_reason = _check_cooldown_and_reentry(p, state, signal, df)
     if not can_open:
         p.logger.info(f"{p.tag} ❌ 拒绝开仓（冷静期/波动过滤）: {block_reason}")
+        # V7.1: 去重推送拒绝理由（同类30分钟内只推一次）
+        _block_alert_key = f"{p.user_id}:cooldown_block"
+        if should_alert(_block_alert_key, 1800):
+            p.notify(
+                f"🧊 <b>{p.username} 信号已出但暂缓开仓</b>\n"
+                f"信号: {signal['action']} {p.symbol}\n"
+                f"原因: {block_reason}\n"
+                f"📋 系统在等待更安全的时机"
+            )
         return None
 
     reason    = signal["reason"]
@@ -1217,13 +1226,40 @@ def _handle_open_position(
                  p.symbol, "开仓", 0.0, reason)
 
     emoji = "🟢" if action == "BUY" else "🔴"
+
+    # V7.1: 开仓通知增加市场上下文 — 让用户理解"为什么这时候开"
+    _regime_str = ""
+    _sq_str = ""
+    _context_str = ""
+    if p.use_auto and p.selector is not None:
+        _r_detail = getattr(p.selector, 'last_regime_detail', {})
+        _regime_name = _r_detail.get("regime", "")
+        _regime_conf = _r_detail.get("confidence", 0)
+        _sq = _r_detail.get("signal_quality", 0)
+        _regime_labels = {"bull": "🐂 牛市", "bear": "🐻 熊市", "ranging": "📊 震荡",
+                          "breakout": "🚀 突破", "wait": "⏸️ 观望"}
+        _regime_str = (
+            f"\n市场状态: {_regime_labels.get(_regime_name, _regime_name)} "
+            f"({_regime_conf:.0%})"
+        )
+        _sq_str = f"\n信号质量: {_sq:.0f}/100"
+
+    # 如果刚结束冷静期，说明上下文
+    _last_close = state.get("last_close_reason", "")
+    _last_pnl = state.get("last_close_pnl", 0)
+    if _last_close:
+        _pnl_tag = f"{_last_pnl:+.2f}U" if _last_pnl else ""
+        _context_str = f"\n📝 上次: {_last_close} {_pnl_tag}"
+
     p.notify(
         f"{emoji} <b>{p.username} {'开多' if action=='BUY' else '开空'}</b>\n"
         f"品种: {p.symbol} | 杠杆: {p.leverage}x\n"
         f"入场价: {fill_price:.2f} | 数量: {contracts}张\n"
         f"止损: {target_sl:.2f} | 止盈: {target_tp:.2f}\n"
         f"保证金: ~{margin_used:.2f} U | 风险: ~{usdt_free * p.risk_pct:.2f} U\n"
-        f"策略: {p.strategy.name} | 原因: {reason}"
+        f"策略: {p.strategy.name}\n"
+        f"原因: {reason}"
+        f"{_regime_str}{_sq_str}{_context_str}"
     )
     return state
 
@@ -1504,14 +1540,18 @@ def _run_reconciliation(p: _RunParams):
         entry_price = trade.get("entry_price", 0)
         estimated_pnl = trade.get("pnl", 0)
         entry_time_str = trade.get("entry_time", "")
+        exit_time_str = trade.get("exit_time", "")
 
         try:
             # ── 方法一：fetch_my_trades ────────────────────────────────────
+            # V7.1: 优先用 exit_time 作为 since 起点，避免持仓时间长时50条 limit 不够
             since_ms = None
-            if entry_time_str:
+            time_str_for_since = exit_time_str or entry_time_str
+            if time_str_for_since:
                 try:
-                    dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
-                    since_ms = int(dt.timestamp() * 1000)
+                    dt = datetime.strptime(time_str_for_since, "%Y-%m-%d %H:%M:%S")
+                    # 往前推 5 分钟，确保不漏掉平仓成交
+                    since_ms = int((dt.timestamp() - 300) * 1000)
                 except Exception:
                     pass
 

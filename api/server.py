@@ -345,6 +345,15 @@ async def ws_status(websocket: WebSocket, token: str = ""):
             "today_pnl":         today_pnl,
             "contract_size":     get_config().get("bot", {}).get("contract_size", 0.01),
             "regime_detail":     regime_detail,
+            # V7.0: 冷静期 & 保护状态
+            "cooldown_active":      ps.get("cooldown_bars_remaining", 0) > 0,
+            "cooldown_bars_remaining": ps.get("cooldown_bars_remaining", 0),
+            "last_close_time":      ps.get("last_close_time", ""),
+            "last_close_reason":    ps.get("last_close_reason", ""),
+            "last_close_pnl":       ps.get("last_close_pnl", 0),
+            "last_close_side":      ps.get("last_close_side", ""),
+            "spike_cooldown_until": ps.get("spike_cooldown_until", ""),
+            "signal_quality":       regime_detail.get("signal_quality"),
         }
 
     try:

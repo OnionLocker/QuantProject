@@ -143,6 +143,17 @@ export default function Dashboard({ username }) {
   const consLoss = d.consecutive_losses ?? bot.consecutive_losses ?? 0
   const hasPos   = posAmt > 0 && posSide && posSide !== 'unknown_rollback_failed'
 
+  // V7.0: 冷静期数据
+  const cooldown = status?.cooldown || {}
+  const cdActive = d.cooldown_active ?? cooldown.active ?? false
+  const cdBarsRemaining = d.cooldown_bars_remaining ?? cooldown.bars_remaining ?? 0
+  const lastCloseTime = d.last_close_time ?? cooldown.last_close_time ?? ''
+  const lastCloseReason = d.last_close_reason ?? cooldown.last_close_reason ?? ''
+  const lastClosePnl = d.last_close_pnl ?? cooldown.last_close_pnl ?? 0
+  const lastCloseSide = d.last_close_side ?? cooldown.last_close_side ?? ''
+  const spikeCooldownUntil = d.spike_cooldown_until ?? cooldown.spike_cooldown_until ?? ''
+  const signalQuality = d.signal_quality ?? regimeDetail.signal_quality ?? null
+
   // V3.0: Regime 数据
   const regimeDetail = d.regime_detail || {}
   const regime       = regimeDetail.regime || null
@@ -589,6 +600,128 @@ export default function Dashboard({ username }) {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── V7.0: 空仓状态解释面板 — "为什么不动" ── */}
+      {running && !hasPos && (
+        <div className="card mb-16">
+          <div className="card-header" style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <Shield size={14} />
+            {cdActive || spikeCooldownUntil
+              ? '🧊 保护模式 · 冷静期中'
+              : '📋 空仓状态'}
+          </div>
+
+          {/* 冷静期警告 */}
+          {cdActive && (
+            <div style={{
+              padding:'12px 16px', borderBottom:'1px solid var(--border)',
+              background:'rgba(100, 181, 246, 0.06)',
+              display:'flex', alignItems:'flex-start', gap:10,
+            }}>
+              <span style={{ fontSize:20, flexShrink:0 }}>🧊</span>
+              <div>
+                <div style={{ fontWeight:700, fontSize:13, color:'var(--blue-light)', marginBottom:4 }}>
+                  平仓冷静期 — 剩余 {cdBarsRemaining} 根 K 线
+                </div>
+                <div style={{ fontSize:12, color:'var(--muted)', lineHeight:1.6 }}>
+                  上次平仓后，系统进入保护模式。即使出现信号也不会立即重新开仓，
+                  避免在波动未稳定时贸然追入。
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 插针冷静期 */}
+          {spikeCooldownUntil && !cdActive && (
+            <div style={{
+              padding:'12px 16px', borderBottom:'1px solid var(--border)',
+              background:'rgba(255, 165, 0, 0.06)',
+              display:'flex', alignItems:'flex-start', gap:10,
+            }}>
+              <span style={{ fontSize:20, flexShrink:0 }}>⚡</span>
+              <div>
+                <div style={{ fontWeight:700, fontSize:13, color:'#ffa500', marginBottom:4 }}>
+                  异常波动冷静期
+                </div>
+                <div style={{ fontSize:12, color:'var(--muted)', lineHeight:1.6 }}>
+                  检测到近期 K 线存在插针/异常波动，系统暂停开仓等待波动率回落。
+                  <br/>截止时间: {spikeCooldownUntil}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 上次平仓信息 + 信号质量 */}
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)' }}>
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>上次平仓</div>
+              <div style={{ fontSize:13, fontWeight:600,
+                color: lastClosePnl > 0 ? 'var(--green)' : lastClosePnl < 0 ? 'var(--red)' : 'var(--muted2)' }}>
+                {lastClosePnl ? `${lastClosePnl > 0 ? '+' : ''}${Number(lastClosePnl).toFixed(2)} U` : '—'}
+              </div>
+              {lastCloseReason && (
+                <div style={{ fontSize:10, color:'var(--muted)', marginTop:2 }}>{lastCloseReason}</div>
+              )}
+            </div>
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>上次方向</div>
+              <div style={{ fontSize:13, fontWeight:600,
+                color: lastCloseSide === 'long' ? 'var(--green)' : lastCloseSide === 'short' ? 'var(--red)' : 'var(--muted2)' }}>
+                {lastCloseSide === 'long' ? '做多' : lastCloseSide === 'short' ? '做空' : '—'}
+              </div>
+              {lastCloseTime && (
+                <div style={{ fontSize:10, color:'var(--muted)', marginTop:2 }}>{lastCloseTime.slice(5,16)}</div>
+              )}
+            </div>
+            <div style={{ padding:'12px 16px', borderRight:'1px solid var(--border)' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>信号质量</div>
+              <div style={{ fontSize:15, fontWeight:700,
+                color: signalQuality == null ? 'var(--muted2)'
+                  : signalQuality >= 60 ? 'var(--green)'
+                  : signalQuality >= 35 ? 'var(--yellow)'
+                  : 'var(--red)' }}>
+                {signalQuality != null ? `${Number(signalQuality).toFixed(0)}/100` : '—'}
+              </div>
+              <div style={{ fontSize:10, color:'var(--muted)', marginTop:2 }}>
+                {signalQuality != null
+                  ? signalQuality >= 60 ? '信号较强' : signalQuality >= 35 ? '信号一般' : '信号较弱'
+                  : ''}
+              </div>
+            </div>
+            <div style={{ padding:'12px 16px' }}>
+              <div style={{ fontSize:11, color:'var(--muted)', marginBottom:4 }}>当前状态</div>
+              <div style={{ fontSize:13, fontWeight:600, color:'var(--text)' }}>
+                {cdActive ? '⏸️ 冷静等待'
+                  : spikeCooldownUntil ? '⚡ 波动过滤'
+                  : regime === 'wait' ? '👀 观望中'
+                  : regime ? '🔍 寻找信号'
+                  : '—'}
+              </div>
+              <div style={{ fontSize:10, color:'var(--muted)', marginTop:2 }}>
+                {cdActive ? '不会贸然追入'
+                  : spikeCooldownUntil ? '等待波动率回落'
+                  : regime === 'wait' ? '市场方向不明'
+                  : '等待优质开仓时机'}
+              </div>
+            </div>
+          </div>
+
+          {/* 无冷静期时的说明文字 */}
+          {!cdActive && !spikeCooldownUntil && (
+            <div style={{
+              padding:'10px 16px', borderTop:'1px solid var(--border)',
+              fontSize:12, color:'var(--muted)', lineHeight:1.6,
+            }}>
+              {regime === 'wait'
+                ? '📋 当前市场方向不明确（ADX 较低 + 趋势信号模糊），系统选择等待更明确的信号再入场。'
+                : regime === 'ranging'
+                  ? '📋 当前市场处于震荡区间，系统使用震荡策略评估，等待突破或反转信号。'
+                  : `📋 市场状态: ${regimeLabels[regime] || '评估中'} — 策略正在评估信号，满足条件后将自动开仓。`
+              }
+            </div>
+          )}
         </div>
       )}
 
