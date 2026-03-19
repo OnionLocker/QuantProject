@@ -713,7 +713,8 @@ def _handle_regime_transition(
             f"品种: {p.symbol} | 方向: {_side_label}\n"
             f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
             f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-            f"操作: {transition_action} | 紧急度: {transition_urgency:.0%}"
+            f"操作: {transition_action} | 紧急度: {transition_urgency:.0%}\n"
+            f"🧊 已进入冷静期，不会立即重新开仓"
         )
         clear_state(p.user_id)
         state = load_state(p.user_id)
@@ -1518,7 +1519,8 @@ def _execute_close(
         f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
         f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
         f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-        f"来源: ✅ 主动市价平仓"
+        f"来源: ✅ 主动市价平仓\n"
+        f"🧊 已进入冷静期，不会立即重新开仓"
     )
     return new_state
 

@@ -152,10 +152,10 @@ export default function Dashboard({ username }) {
   const lastClosePnl = d.last_close_pnl ?? cooldown.last_close_pnl ?? 0
   const lastCloseSide = d.last_close_side ?? cooldown.last_close_side ?? ''
   const spikeCooldownUntil = d.spike_cooldown_until ?? cooldown.spike_cooldown_until ?? ''
-  const signalQuality = d.signal_quality ?? regimeDetail.signal_quality ?? null
 
-  // V3.0: Regime 数据
+  // V3.0: Regime 数据（必须在 signalQuality 之前定义，否则 TDZ 导致 ReferenceError）
   const regimeDetail = d.regime_detail || {}
+  const signalQuality = d.signal_quality ?? regimeDetail.signal_quality ?? null
   const regime       = regimeDetail.regime || null
   const regimeConf   = regimeDetail.confidence || 0
   const inTransition = regimeDetail.in_transition || false
