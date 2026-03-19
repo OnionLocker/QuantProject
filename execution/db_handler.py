@@ -205,8 +205,18 @@ def init_db():
             '''CREATE INDEX IF NOT EXISTS idx_trade_user_time
             ON trade_history(user_id, entry_time)''',
         ]),
+        (5, "V6.0: trade_history 对账体系 — 区分估算/真实盈亏", [
+            "ALTER TABLE trade_history ADD COLUMN exit_reason TEXT DEFAULT NULL",
+            "ALTER TABLE trade_history ADD COLUMN is_estimated INTEGER DEFAULT 0",
+            "ALTER TABLE trade_history ADD COLUMN reconciled INTEGER DEFAULT 1",
+            "ALTER TABLE trade_history ADD COLUMN fill_source TEXT DEFAULT NULL",
+            "ALTER TABLE trade_history ADD COLUMN estimated_pnl REAL DEFAULT NULL",
+            "ALTER TABLE trade_history ADD COLUMN exchange_trade_id TEXT DEFAULT NULL",
+            "ALTER TABLE trade_history ADD COLUMN exchange_order_id TEXT DEFAULT NULL",
+            "ALTER TABLE trade_history ADD COLUMN reconciled_at TEXT DEFAULT NULL",
+        ]),
         # ── 未来新增迁移追加在这里 ──────────────────────────────────────────
-        # (5, "xxx", ["ALTER TABLE ..."]),
+        # (6, "xxx", ["ALTER TABLE ..."]),
     ]
 
     for version, desc, sqls in _MIGRATIONS:
@@ -500,15 +510,28 @@ def record_balance(user_id_or_balance, balance: float = None):
 
 def record_trade(user_id=None, side=None, price=None, amount=None,
                  symbol: str = "BTC/USDT", action: str = "未知",
-                 pnl: float = 0.0, reason: str = ""):
+                 pnl: float = 0.0, reason: str = "",
+                 # ── V6.0 对账体系新参数 ──
+                 is_estimated: bool = False,
+                 fill_source: str = "",
+                 exit_reason: str = "",
+                 exchange_trade_id: str = "",
+                 exchange_order_id: str = "",
+                 fee: float = 0.0,
+                 entry_price_override: float = None,
+                 ) -> int:
     """
-    多用户版：record_trade(user_id=1, side='buy', price=..., amount=..., ...)
-    单用户版：record_trade(side='buy', price=..., amount=..., ...)
-              ← user_id 不传，自动为 0
+    写入交易记录，支持对账体系。
 
-    当前统一写入新结构 trade_history：
-    - entry_time / entry_price / status / fee
-    - action / reason 仅做兼容映射，不再直接落旧字段
+    V6.0 新增参数：
+      - is_estimated:  True = 盈亏为估算值（待对账）
+      - fill_source:   成交价来源（如 "交易所真实成交价", "⚠️ 近似估算"）
+      - exit_reason:   退出原因（止损/止盈/追踪止损/策略反转/时间止损等）
+      - exchange_trade_id / exchange_order_id: 交易所侧 ID
+      - fee:           手续费
+      - entry_price_override: 用于平仓记录中记录开仓价
+
+    返回新插入记录的 id。
     """
     _user_id = 0 if (user_id is None) else int(user_id)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -517,26 +540,121 @@ def record_trade(user_id=None, side=None, price=None, amount=None,
     _price = float(price or 0)
     _amount = float(amount or 0)
     _status = 'closed' if ('平仓' in _action or _action.lower() == 'close') else 'open'
-    _fee = 0.0
+    _pnl = float(pnl or 0)
+    _fee = float(fee or 0)
+    _is_estimated = 1 if is_estimated else 0
+    _reconciled = 0 if is_estimated else 1
+    _entry_price = float(entry_price_override or _price)
+    _exit_price = _price if _status == 'closed' else None
+
     conn = get_conn()
-    conn.execute('''
-        INSERT INTO trade_history
-          (user_id, symbol, side, amount, entry_price, exit_price, pnl, fee, entry_time, exit_time, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        _user_id,
-        symbol,
-        _side,
-        _amount,
-        _price,
-        _price if _status == 'closed' else None,
-        float(pnl or 0),
-        _fee,
-        now,
-        now if _status == 'closed' else None,
-        _status,
-    ))
+    try:
+        cursor = conn.execute('''
+            INSERT INTO trade_history
+              (user_id, symbol, side, amount, entry_price, exit_price,
+               pnl, fee, entry_time, exit_time, status,
+               exit_reason, is_estimated, reconciled, fill_source,
+               estimated_pnl, exchange_trade_id, exchange_order_id)
+            VALUES (?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?)
+        ''', (
+            _user_id,
+            symbol,
+            _side,
+            _amount,
+            _entry_price,
+            _exit_price,
+            _pnl,
+            _fee,
+            now,
+            now if _status == 'closed' else None,
+            _status,
+            exit_reason or None,
+            _is_estimated,
+            _reconciled,
+            fill_source or None,
+            _pnl if is_estimated else None,
+            exchange_trade_id or None,
+            exchange_order_id or None,
+        ))
+    except sqlite3.OperationalError:
+        # 兼容旧版表结构（V6.0 迁移前）：回退到基础字段
+        logger.debug("trade_history 新字段不存在，回退到旧版 INSERT")
+        cursor = conn.execute('''
+            INSERT INTO trade_history
+              (user_id, symbol, side, amount, entry_price, exit_price,
+               pnl, fee, entry_time, exit_time, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            _user_id, symbol, _side, _amount, _entry_price, _exit_price,
+            _pnl, _fee, now, now if _status == 'closed' else None, _status,
+        ))
+    trade_id = cursor.lastrowid
     conn.commit()
+    return trade_id
+
+
+def reconcile_trade(trade_id: int, real_pnl: float, real_exit_price: float,
+                    fill_source: str, exchange_trade_id: str = "",
+                    fee: float = None):
+    """
+    V6.0: 对账回填 — 将一笔 estimated 交易更新为真实已对账结果。
+    """
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_conn()
+
+    # 先读取原始估算值保留到 estimated_pnl
+    row = conn.execute(
+        "SELECT pnl, is_estimated FROM trade_history WHERE id=?", (trade_id,)
+    ).fetchone()
+    if not row:
+        return
+
+    estimated_pnl = row[0] if row[1] else None
+
+    update_fields = {
+        "pnl": real_pnl,
+        "exit_price": real_exit_price,
+        "is_estimated": 0,
+        "reconciled": 1,
+        "fill_source": fill_source,
+        "reconciled_at": now,
+        "exchange_trade_id": exchange_trade_id or None,
+    }
+    if estimated_pnl is not None:
+        update_fields["estimated_pnl"] = estimated_pnl
+    if fee is not None:
+        update_fields["fee"] = fee
+
+    set_clause = ", ".join(f"{k}=?" for k in update_fields)
+    values = list(update_fields.values()) + [trade_id]
+    conn.execute(
+        f"UPDATE trade_history SET {set_clause} WHERE id=?",
+        values
+    )
+    conn.commit()
+    logger.info("对账回填完成: trade_id=%d, 估算=%.2f → 真实=%.2f",
+                trade_id, estimated_pnl or 0, real_pnl)
+
+
+def get_pending_reconcile_trades(user_id: int, limit: int = 20) -> list:
+    """
+    V6.0: 获取待对账的交易记录（is_estimated=1 且 reconciled=0）。
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, symbol, side, amount, entry_price, exit_price, pnl, "
+        "       entry_time, exit_time, fill_source, exchange_order_id "
+        "FROM trade_history "
+        "WHERE user_id=? AND is_estimated=1 AND reconciled=0 "
+        "ORDER BY id DESC LIMIT ?",
+        (user_id, limit)
+    ).fetchall()
+    keys = ["id", "symbol", "side", "amount", "entry_price", "exit_price",
+            "pnl", "entry_time", "exit_time", "fill_source", "exchange_order_id"]
+    return [dict(zip(keys, r)) for r in rows]
 
 
 # init_db() 已移至 api/server.py 的 startup 事件中显式调用，

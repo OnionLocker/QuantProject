@@ -27,35 +27,74 @@ _backtest_running: dict = {}   # user_id -> bool
 def get_trades(limit: int = 50, user=Depends(get_current_user)):
     conn = get_conn()
     try:
-        # 新版表结构：entry/exit 模型
+        # V6.0: 包含对账字段
         rows = conn.execute(
-            "SELECT id, entry_time, symbol, side, status, entry_price, amount, pnl, fee "
+            "SELECT id, entry_time, exit_time, symbol, side, status, "
+            "       entry_price, exit_price, amount, pnl, fee, "
+            "       exit_reason, is_estimated, reconciled, fill_source, "
+            "       estimated_pnl, reconciled_at "
             "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
             (user["id"], limit)
         ).fetchall()
         result = []
         for r in rows:
+            is_est = bool(r[12]) if r[12] is not None else False
+            reconciled = bool(r[13]) if r[13] is not None else True
             result.append({
                 "id": r[0],
                 "timestamp": r[1],
-                "symbol": r[2],
-                "side": r[3],
-                "action": r[4],
-                "price": r[5],
-                "amount": r[6],
-                "pnl": r[7],
-                "reason": f"fee={r[8]}" if r[8] is not None else "",
+                "exit_time": r[2],
+                "symbol": r[3],
+                "side": r[4],
+                "action": r[5],    # status 字段作为 action
+                "entry_price": r[6],
+                "price": r[7] or r[6],  # 兼容: exit_price 优先，fallback entry_price
+                "amount": r[8],
+                "pnl": r[9],
+                "fee": r[10],
+                "exit_reason": r[11] or "",
+                "is_estimated": is_est,
+                "reconciled": reconciled,
+                "fill_source": r[14] or "",
+                "estimated_pnl": r[15],
+                "reconciled_at": r[16],
+                # 兼容旧前端的 reason 字段
+                "reason": r[11] or (f"fee={r[10]}" if r[10] else ""),
             })
         return result
     except Exception:
-        # 兼容旧版表结构
-        rows = conn.execute(
-            "SELECT id,timestamp,symbol,side,action,price,amount,pnl,reason "
-            "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
-            (user["id"], limit)
-        ).fetchall()
-        keys = ["id", "timestamp", "symbol", "side", "action", "price", "amount", "pnl", "reason"]
-        return [dict(zip(keys, r)) for r in rows]
+        # 兼容旧版表结构（V6.0 之前）
+        try:
+            rows = conn.execute(
+                "SELECT id, entry_time, symbol, side, status, entry_price, amount, pnl, fee "
+                "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user["id"], limit)
+            ).fetchall()
+            result = []
+            for r in rows:
+                result.append({
+                    "id": r[0],
+                    "timestamp": r[1],
+                    "symbol": r[2],
+                    "side": r[3],
+                    "action": r[4],
+                    "price": r[5],
+                    "amount": r[6],
+                    "pnl": r[7],
+                    "reason": f"fee={r[8]}" if r[8] is not None else "",
+                    "is_estimated": False,
+                    "reconciled": True,
+                })
+            return result
+        except Exception:
+            # 兼容最旧版表结构
+            rows = conn.execute(
+                "SELECT id,timestamp,symbol,side,action,price,amount,pnl,reason "
+                "FROM trade_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user["id"], limit)
+            ).fetchall()
+            keys = ["id", "timestamp", "symbol", "side", "action", "price", "amount", "pnl", "reason"]
+            return [dict(zip(keys, r)) for r in rows]
 
 
 @router.get("/balance", summary="我的每日余额历史")

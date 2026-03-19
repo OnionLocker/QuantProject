@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { dataApi } from '../api'
-import { ArrowUpRight, ArrowDownRight, Minus, RefreshCw } from 'lucide-react'
+import { ArrowUpRight, ArrowDownRight, Minus, RefreshCw, AlertTriangle, CheckCircle, Clock } from 'lucide-react'
 
 const PAGE_SIZE = 20
 
@@ -20,16 +20,62 @@ export default function TradesPage() {
 
   useEffect(() => { load() }, [])
 
-  // 统计
-  const closedTrades = trades.filter(t => t.pnl !== 0 || t.action === '平仓' || t.action === '被动平仓(SL/TP)')
-  const wins   = closedTrades.filter(t => t.pnl > 0).length
-  const losses = closedTrades.filter(t => t.pnl < 0).length
-  const totalPnl = closedTrades.reduce((s, t) => s + (t.pnl || 0), 0)
-  const winRate  = closedTrades.length > 0 ? wins / closedTrades.length * 100 : 0
+  // 统计（只统计已对账的真实盈亏）
+  const closedTrades = trades.filter(t => t.pnl !== 0 || t.action === 'closed' || t.action === '平仓' || t.action === '被动平仓(SL/TP)')
+  const reconciledTrades = closedTrades.filter(t => !t.is_estimated)
+  const estimatedTrades = closedTrades.filter(t => t.is_estimated)
+  const wins   = reconciledTrades.filter(t => t.pnl > 0).length
+  const losses = reconciledTrades.filter(t => t.pnl < 0).length
+  const totalPnl = reconciledTrades.reduce((s, t) => s + (t.pnl || 0), 0)
+  const winRate  = reconciledTrades.length > 0 ? wins / reconciledTrades.length * 100 : 0
 
   // 分页
   const totalPages = Math.ceil(trades.length / PAGE_SIZE)
   const paged      = trades.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  // 退出原因颜色映射
+  const exitReasonStyle = (reason) => {
+    if (!reason) return { color: 'var(--muted)', text: '—' }
+    if (reason.includes('止盈')) return { color: 'var(--green)', text: `🎉 ${reason}` }
+    if (reason.includes('止损')) return { color: 'var(--red)', text: `🩸 ${reason}` }
+    if (reason.includes('追踪')) return { color: 'var(--yellow)', text: `📈 ${reason}` }
+    if (reason.includes('保本')) return { color: 'var(--blue-light)', text: `🔒 ${reason}` }
+    if (reason.includes('策略反转')) return { color: 'var(--purple)', text: `↩ ${reason}` }
+    if (reason.includes('时间')) return { color: 'var(--muted)', text: `⏱️ ${reason}` }
+    if (reason.includes('Regime')) return { color: 'var(--yellow)', text: `🔄 ${reason}` }
+    if (reason.includes('待确认')) return { color: 'var(--muted)', text: `❓ ${reason}` }
+    return { color: 'var(--muted)', text: reason }
+  }
+
+  // 对账状态标记
+  const reconcileStatus = (t) => {
+    if (t.action === 'open' || t.action === '开仓') return null // 开仓记录无需对账
+    if (t.is_estimated && !t.reconciled) {
+      return (
+        <span style={{
+          display: 'inline-flex', alignItems: 'center', gap: 3,
+          fontSize: 10, padding: '1px 6px', borderRadius: 3,
+          background: 'rgba(255, 165, 0, 0.15)', color: '#ffa500',
+          fontWeight: 600, whiteSpace: 'nowrap',
+        }}>
+          <AlertTriangle size={9} />估算·待对账
+        </span>
+      )
+    }
+    if (t.reconciled && t.estimated_pnl != null && t.estimated_pnl !== t.pnl) {
+      return (
+        <span style={{
+          display: 'inline-flex', alignItems: 'center', gap: 3,
+          fontSize: 10, padding: '1px 6px', borderRadius: 3,
+          background: 'rgba(38, 166, 154, 0.15)', color: 'var(--green)',
+          fontWeight: 600, whiteSpace: 'nowrap',
+        }}>
+          <CheckCircle size={9} />已对账
+        </span>
+      )
+    }
+    return null
+  }
 
   return (
     <div>
@@ -79,10 +125,11 @@ export default function TradesPage() {
           {/* 统计行 */}
           <div className="stat-grid stat-grid-4 mb-20">
             <div className="stat-cell">
-              <div className="s-label">总盈亏</div>
+              <div className="s-label">真实总盈亏</div>
               <div className="s-value" style={{ color: totalPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
                 {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)} U
               </div>
+              <div className="s-sub">仅统计已对账交易</div>
             </div>
             <div className="stat-cell">
               <div className="s-label">胜率</div>
@@ -92,16 +139,43 @@ export default function TradesPage() {
               <div className="s-sub">{wins}W / {losses}L</div>
             </div>
             <div className="stat-cell">
-              <div className="s-label">总笔数</div>
-              <div className="s-value">{closedTrades.length}</div>
+              <div className="s-label">已对账 / 总平仓</div>
+              <div className="s-value">{reconciledTrades.length} / {closedTrades.length}</div>
               <div className="s-sub">已平仓</div>
             </div>
             <div className="stat-cell">
-              <div className="s-label">记录总数</div>
-              <div className="s-value">{trades.length}</div>
-              <div className="s-sub">含开/平仓</div>
+              <div className="s-label">待对账</div>
+              <div className="s-value" style={{ color: estimatedTrades.length > 0 ? '#ffa500' : 'var(--green)' }}>
+                {estimatedTrades.length}
+              </div>
+              <div className="s-sub" style={{ color: estimatedTrades.length > 0 ? '#ffa500' : 'var(--muted)' }}>
+                {estimatedTrades.length > 0 ? '⚠️ 盈亏为估算值' : '✅ 全部已对账'}
+              </div>
             </div>
           </div>
+
+          {/* 待对账提醒 */}
+          {estimatedTrades.length > 0 && (
+            <div className="alert alert-warning mb-16" style={{
+              background: 'rgba(255, 165, 0, 0.08)',
+              border: '1px solid rgba(255, 165, 0, 0.2)',
+              borderRadius: 8, padding: '12px 16px',
+              display: 'flex', alignItems: 'flex-start', gap: 10,
+            }}>
+              <AlertTriangle size={16} style={{ color: '#ffa500', flexShrink: 0, marginTop: 2 }} />
+              <div style={{ fontSize: 12 }}>
+                <strong style={{ color: '#ffa500' }}>
+                  {estimatedTrades.length} 笔交易待对账
+                </strong>
+                <div style={{ color: 'var(--muted)', marginTop: 4, lineHeight: 1.5 }}>
+                  标有「估算·待对账」的交易暂未拿到交易所真实成交结果，
+                  显示的盈亏为估算值，仅供参考。系统会自动重查并回填真实结果。
+                  <br/>
+                  <strong>总盈亏仅统计已对账交易</strong>，不含估算值。
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* 表格 */}
           <div className="card">
@@ -121,18 +195,24 @@ export default function TradesPage() {
                       <th className="text-right">价格</th>
                       <th className="text-right">数量</th>
                       <th className="text-right">盈亏 (U)</th>
-                      <th>原因</th>
+                      <th>退出原因</th>
+                      <th>状态</th>
                     </tr>
                   </thead>
                   <tbody>
                     {paged.map(t => {
                       const hasPnl = t.pnl !== 0
                       const isWin  = t.pnl > 0
+                      const isEstimated = t.is_estimated
+                      const exitStyle = exitReasonStyle(t.exit_reason)
+                      const statusBadge = reconcileStatus(t)
                       return (
                         <tr key={t.id} style={{
-                          background: hasPnl
-                            ? isWin ? 'rgba(38,166,154,.04)' : 'rgba(239,83,80,.04)'
-                            : undefined
+                          background: isEstimated
+                            ? 'rgba(255, 165, 0, 0.03)'
+                            : hasPnl
+                              ? isWin ? 'rgba(38,166,154,.04)' : 'rgba(239,83,80,.04)'
+                              : undefined
                         }}>
                           <td className="col-muted" style={{ whiteSpace: 'nowrap' }}>{t.timestamp}</td>
                           <td>
@@ -147,30 +227,55 @@ export default function TradesPage() {
                           </td>
                           <td>
                             <span className={`badge ${
-                              t.action === '开仓' ? 'badge-blue' :
-                              t.action === '平仓' ? 'badge-gray' :
-                              t.action.includes('SL') || t.action.includes('TP') ? 'badge-yellow' : 'badge-gray'
+                              t.action === 'open' || t.action === '开仓' ? 'badge-blue' :
+                              t.action === 'closed' || t.action === '平仓' ? 'badge-gray' :
+                              (t.action || '').includes('SL') || (t.action || '').includes('TP') ? 'badge-yellow' : 'badge-gray'
                             }`} style={{ fontSize: 10 }}>
-                              {t.action}
+                              {t.action === 'open' ? '开仓' :
+                               t.action === 'closed' ? '平仓' :
+                               t.action}
                             </span>
                           </td>
-                          <td className="text-right fw-600">
+                          <td className="text-right fw-600" style={{
+                            opacity: isEstimated ? 0.7 : 1,
+                          }}>
+                            {isEstimated && hasPnl ? '~' : ''}
                             {parseFloat(t.price).toLocaleString(undefined,{minimumFractionDigits:2})}
                           </td>
                           <td className="text-right col-muted">{t.amount}</td>
-                          <td className={`text-right fw-600 ${hasPnl ? (isWin ? 'col-green' : 'col-red') : 'col-muted'}`}>
+                          <td className={`text-right fw-600`} style={{
+                            color: isEstimated
+                              ? '#ffa500'
+                              : hasPnl
+                                ? (isWin ? 'var(--green)' : 'var(--red)')
+                                : 'var(--muted)',
+                            fontStyle: isEstimated ? 'italic' : 'normal',
+                          }}>
                             {hasPnl
-                              ? `${isWin ? '+' : ''}${parseFloat(t.pnl).toFixed(2)}`
+                              ? <>
+                                  {isEstimated ? '~' : ''}
+                                  {isWin ? '+' : ''}{parseFloat(t.pnl).toFixed(2)}
+                                  {/* 如果已对账且有估算值差异，显示 */}
+                                  {t.reconciled && t.estimated_pnl != null && t.estimated_pnl !== t.pnl && (
+                                    <span style={{
+                                      display: 'block', fontSize: 9, color: 'var(--muted)',
+                                      fontStyle: 'normal', fontWeight: 400,
+                                    }}>
+                                      原估算: {t.estimated_pnl > 0 ? '+' : ''}{parseFloat(t.estimated_pnl).toFixed(2)}
+                                    </span>
+                                  )}
+                                </>
                               : '—'
                             }
                           </td>
-                          <td className="col-muted" style={{
-                            maxWidth: 200, overflow: 'hidden',
+                          <td style={{
+                            maxWidth: 160, overflow: 'hidden',
                             textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                            fontSize: 11,
+                            fontSize: 11, color: exitStyle.color,
                           }}>
-                            {t.reason || '—'}
+                            {exitStyle.text}
                           </td>
+                          <td>{statusBadge}</td>
                         </tr>
                       )
                     })}

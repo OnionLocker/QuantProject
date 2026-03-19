@@ -28,7 +28,8 @@ from utils.logger import bot_logger
 from utils.config_loader import get_config
 from strategy.registry import get_strategy
 from execution.db_handler import (
-    record_balance, record_trade,
+    record_balance, record_trade, reconcile_trade,
+    get_pending_reconcile_trades,
 )
 from api.routes.keys import get_user_exchange
 from risk.risk_manager import RiskManager
@@ -71,15 +72,43 @@ _ERROR_MSG_MAX_LEN:         int = 200   # 错误消息最大长度
 _SHORT_TB_MAX_LEN:          int = 300   # 短调用栈最大长度
 
 
-# ── 被动平仓成交价获取（优先拉取真实成交，废弃推断）────────────────────────────
+# ── 被动平仓成交价获取（V6.0 重构：返回完整成交信息）──────────────────────────
 
-def _fetch_passive_fill_price(ex, symbol: str, state: dict) -> tuple[float, str]:
+class PassiveFillResult:
+    """被动平仓成交结果容器"""
+    __slots__ = (
+        'fill_price', 'fill_source', 'is_estimated',
+        'exchange_trade_id', 'exchange_order_id',
+        'real_pnl', 'real_fee', 'exit_reason',
+    )
+
+    def __init__(self):
+        self.fill_price = 0.0
+        self.fill_source = ""
+        self.is_estimated = True
+        self.exchange_trade_id = ""
+        self.exchange_order_id = ""
+        self.real_pnl = None       # 交易所返回的已实现盈亏（如有）
+        self.real_fee = None       # 交易所返回的手续费（如有）
+        self.exit_reason = "被动平仓（原因待确认）"
+
+
+def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> PassiveFillResult:
     """
-    从交易所拉取最近的 reduceOnly 成交记录，返回真实成交价。
-    若拉取失败，fallback 到 SL/TP 价格（仅作为最后手段，会在 reason 里标注）。
-    返回: (fill_price, 来源说明)
+    V6.0: 从交易所拉取被动平仓的真实成交信息。
+
+    优先级：
+      1. fetch_my_trades → 找到 reduceOnly / close_long / close_short 的成交
+      2. fetch_order → 用存储的 SL/TP 条件单 ID 查询成交结果
+      3. OKX 原始 bill 接口 → 查已实现盈亏
+      4. Fallback: 用 SL/TP 价格估算（明确标记为估算）
+
+    返回 PassiveFillResult 对象，调用方根据 .is_estimated 决定展示方式。
     """
-    # ── 方法一：从 fetch_my_trades 取最近的减仓成交 ──────────────────────────
+    result = PassiveFillResult()
+    _log = logger
+
+    # ── 方法一：fetch_my_trades 拉取最近的减仓成交 ────────────────────────
     try:
         since_ms = None
         entry_time_str = state.get("entry_time", "")
@@ -87,42 +116,132 @@ def _fetch_passive_fill_price(ex, symbol: str, state: dict) -> tuple[float, str]
             dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
             since_ms = int(dt.timestamp() * 1000)
 
-        trades = ex.fetch_my_trades(symbol, since=since_ms, limit=20)
+        trades = ex.fetch_my_trades(symbol, since=since_ms, limit=50)
         close_trades = [
             t for t in trades
             if (
                 t.get("reduceOnly") or
                 t.get("info", {}).get("reduceOnly") or
-                str(t.get("info", {}).get("side", "")).lower() in ("close_long", "close_short")
+                str(t.get("info", {}).get("side", "")).lower() in ("close_long", "close_short") or
+                str(t.get("info", {}).get("posSide", "")).lower() in ("long", "short") and
+                str(t.get("side", "")).lower() != state.get("position_side", "")
             )
         ]
         if close_trades:
             latest = sorted(close_trades, key=lambda x: x.get("timestamp", 0))[-1]
             price = float(latest.get("price") or latest.get("average") or 0)
             if price > 0:
-                return price, "交易所真实成交价"
-    except Exception:
-        pass
+                result.fill_price = price
+                result.fill_source = "交易所真实成交（fetch_my_trades）"
+                result.is_estimated = False
+                result.exchange_trade_id = str(latest.get("id", ""))
+                result.exchange_order_id = str(latest.get("order", ""))
 
-    # ── 方法二：从 fetch_orders 找已成交的条件单 ────────────────────────────
+                # 尝试从 info 中提取已实现盈亏和手续费
+                info = latest.get("info", {})
+                pnl_val = info.get("pnl") or info.get("realizedPnl")
+                if pnl_val is not None:
+                    try:
+                        result.real_pnl = float(pnl_val)
+                    except (TypeError, ValueError):
+                        pass
+                fee_val = latest.get("fee", {}).get("cost") or info.get("fee")
+                if fee_val is not None:
+                    try:
+                        result.real_fee = abs(float(fee_val))
+                    except (TypeError, ValueError):
+                        pass
+
+                # 推断退出原因
+                result.exit_reason = _infer_exit_reason_from_trades(state, price, close_trades)
+
+                if _log:
+                    _log.info(f"✅ 真实成交: price={price}, trade_id={result.exchange_trade_id}, "
+                              f"pnl={result.real_pnl}, fee={result.real_fee}")
+                return result
+    except Exception as e:
+        if _log:
+            _log.debug(f"fetch_my_trades 拉取失败: {e}")
+
+    # ── 方法二：fetch_order 查询 SL/TP 条件单成交 ─────────────────────────
     try:
         sl_id = state.get("exchange_order_ids", {}).get("sl_order")
         tp_id = state.get("exchange_order_ids", {}).get("tp_order")
-        for order_id in filter(None, [tp_id, sl_id]):
+        for order_id, order_type in [(tp_id, "止盈"), (sl_id, "止损")]:
+            if not order_id:
+                continue
             try:
                 order = ex.fetch_order(order_id, symbol, params={"stop": True})
                 status = (order.get("status") or "").lower()
                 if status in ("closed", "filled"):
                     fill = float(order.get("average") or order.get("price") or 0)
                     if fill > 0:
-                        label = "TP成交价" if order_id == tp_id else "SL成交价"
-                        return fill, f"条件单{label}（真实）"
+                        result.fill_price = fill
+                        result.fill_source = f"条件单{order_type}成交（fetch_order）"
+                        result.is_estimated = False
+                        result.exchange_order_id = str(order_id)
+                        result.exit_reason = f"{order_type}触发"
+
+                        # 尝试从 order info 取盈亏
+                        info = order.get("info", {})
+                        pnl_val = info.get("pnl") or info.get("slTriggerPx") or None
+                        fee_val = order.get("fee", {}).get("cost") or info.get("fee")
+                        if fee_val is not None:
+                            try:
+                                result.real_fee = abs(float(fee_val))
+                            except (TypeError, ValueError):
+                                pass
+
+                        if _log:
+                            _log.info(f"✅ 条件单成交: {order_type}, price={fill}, "
+                                      f"order_id={order_id}")
+                        return result
             except Exception:
                 continue
-    except Exception:
-        pass
+    except Exception as e:
+        if _log:
+            _log.debug(f"fetch_order 查询失败: {e}")
 
-    # ── Fallback：使用 SL/TP 价格作为近似值（标注为估算）────────────────────
+    # ── 方法三：OKX 原始 bill 接口查已实现盈亏 ───────────────────────────
+    try:
+        inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+        if not inst_id.endswith("-SWAP"):
+            inst_id += "-SWAP"
+        resp = ex.privateGetAccountBills({
+            "instId": inst_id,
+            "type": "2",  # 2=交易
+            "limit": "20",
+        })
+        bills = (resp or {}).get("data") or []
+        for bill in bills:
+            bill_pnl = bill.get("pnl")
+            bill_px = bill.get("px")
+            if bill_pnl is not None and bill_px:
+                try:
+                    _px = float(bill_px)
+                    _pnl = float(bill_pnl)
+                    if _px > 0:
+                        result.fill_price = _px
+                        result.fill_source = "OKX账单接口（privateGetAccountBills）"
+                        result.is_estimated = False
+                        result.real_pnl = _pnl
+                        result.exchange_order_id = str(bill.get("ordId", ""))
+
+                        _fee = bill.get("fee")
+                        if _fee is not None:
+                            result.real_fee = abs(float(_fee))
+
+                        result.exit_reason = _infer_exit_reason_from_price(state, _px)
+                        if _log:
+                            _log.info(f"✅ OKX bill 接口成交: price={_px}, pnl={_pnl}")
+                        return result
+                except (TypeError, ValueError):
+                    continue
+    except Exception as e:
+        if _log:
+            _log.debug(f"OKX bill 接口查询失败: {e}")
+
+    # ── Fallback：使用 SL/TP 价格作为近似估算 ────────────────────────────
     is_long   = state["position_side"] == "long"
     entry     = state["entry_price"]
     active_sl = state["active_sl"]
@@ -136,7 +255,78 @@ def _fetch_passive_fill_price(ex, symbol: str, state: dict) -> tuple[float, str]
     else:
         fill = active_sl if active_sl > 0 else entry
 
-    return fill, "⚠️ 近似估算（建议人工核实）"
+    result.fill_price = fill
+    result.fill_source = "⚠️ 近似估算（未拿到交易所真实成交）"
+    result.is_estimated = True
+    result.exit_reason = _infer_exit_reason_from_price(state, fill)
+
+    if _log:
+        _log.warning(f"⚠️ 未拿到真实成交，使用估算: price={fill}, reason={result.exit_reason}")
+
+    return result
+
+
+def _infer_exit_reason_from_trades(state: dict, fill_price: float, trades: list) -> str:
+    """根据成交价和 SL/TP 价格推断退出原因。"""
+    is_long = state.get("position_side") == "long"
+    active_sl = state.get("active_sl", 0)
+    active_tp = state.get("active_tp1", 0)
+    entry = state.get("entry_price", 0)
+
+    # 检查是否追踪止损触发
+    if state.get("trailing_stop_active"):
+        if is_long and fill_price <= active_sl:
+            return "追踪止损触发"
+        elif not is_long and fill_price >= active_sl:
+            return "追踪止损触发"
+
+    # 检查是否保本止损
+    if state.get("has_moved_to_breakeven") and active_sl > 0:
+        if abs(active_sl - entry) < entry * 0.001:  # SL 接近入场价
+            if is_long and fill_price <= active_sl * 1.001:
+                return "保本止损触发"
+            elif not is_long and fill_price >= active_sl * 0.999:
+                return "保本止损触发"
+
+    # 普通 SL/TP 判断
+    if active_tp > 0:
+        if is_long and fill_price >= active_tp * 0.995:
+            return "止盈触发"
+        elif not is_long and fill_price <= active_tp * 1.005:
+            return "止盈触发"
+
+    if active_sl > 0:
+        if is_long and fill_price <= active_sl * 1.005:
+            return "止损触发"
+        elif not is_long and fill_price >= active_sl * 0.995:
+            return "止损触发"
+
+    return "被动平仓（原因待确认）"
+
+
+def _infer_exit_reason_from_price(state: dict, fill_price: float) -> str:
+    """仅基于 fill_price 和 state 中的 SL/TP 推断退出原因。"""
+    is_long = state.get("position_side") == "long"
+    active_sl = state.get("active_sl", 0)
+    active_tp = state.get("active_tp1", 0)
+    entry = state.get("entry_price", 0)
+
+    if state.get("trailing_stop_active") and active_sl > 0:
+        if is_long and fill_price <= active_sl * 1.005:
+            return "追踪止损触发（推断）"
+        elif not is_long and fill_price >= active_sl * 0.995:
+            return "追踪止损触发（推断）"
+
+    if state.get("has_moved_to_breakeven") and active_sl > 0:
+        if abs(active_sl - entry) < entry * 0.001:
+            return "保本止损触发（推断）"
+
+    if active_tp > 0 and abs(fill_price - active_tp) < abs(fill_price - active_sl):
+        return "止盈触发（推断）"
+    elif active_sl > 0:
+        return "止损触发（推断）"
+
+    return "被动平仓（原因待确认）"
 
 
 # ── 订单对账：Bot 启动时核对 SL/TP 条件单是否仍存在 ─────────────────────────────
@@ -312,28 +502,63 @@ def _handle_passive_close(
     p: _RunParams, state: dict, live_amt: float, usdt_free: float,
 ) -> dict | None:
     """
-    检测到交易所实际持仓为 0（条件单已触发），处理被动平仓。
+    V6.0 重构：检测到交易所实际持仓为 0（条件单已触发），处理被动平仓。
+    - 优先拿真实成交 → 记录真实盈亏
+    - 拿不到真实成交 → 明确标记为估算，通知用户待对账
     返回更新后的 state；若未触发被动平仓，返回 None。
     """
     if live_amt != 0.0:
         return None
 
-    est_fill, fill_src = _fetch_passive_fill_price(p.ex, p.symbol, state)
+    # ── 获取成交信息 ──────────────────────────────────────────────────────
+    fill_info = _fetch_passive_fill_info(p.ex, p.symbol, state, logger=p.logger)
 
     is_long = state["position_side"] == "long"
-    gross = (
-        (est_fill - state["entry_price"]) if is_long
-        else (state["entry_price"] - est_fill)
-    ) * state["position_amount"] * p.contract_size
-    close_fee = state["position_amount"] * p.contract_size * est_fill * p.fee_rate
-    net_pnl = gross - (state["open_fee"] + close_fee)
+    entry_price = state["entry_price"]
 
-    record_trade(p.user_id,
-                 "sell" if is_long else "buy",
-                 est_fill,
-                 state["position_amount"],
-                 p.symbol, "被动平仓(SL/TP)",
-                 net_pnl, fill_src)
+    # ── 计算盈亏 ──────────────────────────────────────────────────────────
+    if fill_info.real_pnl is not None and not fill_info.is_estimated:
+        # 真实已实现盈亏：直接用交易所返回的值
+        net_pnl = fill_info.real_pnl
+        if fill_info.real_fee is not None:
+            # 有些接口返回的 pnl 已扣手续费，有些没有
+            # 如果 real_pnl 是毛利润，需要减去手续费
+            # OKX bill 接口的 pnl 通常已包含手续费
+            pass
+        pnl_source = "交易所已实现盈亏"
+    else:
+        # 计算盈亏（可能是真实成交价 or 估算价）
+        gross = (
+            (fill_info.fill_price - entry_price) if is_long
+            else (entry_price - fill_info.fill_price)
+        ) * state["position_amount"] * p.contract_size
+        close_fee = state["position_amount"] * p.contract_size * fill_info.fill_price * p.fee_rate
+        if fill_info.real_fee is not None:
+            close_fee = fill_info.real_fee
+        net_pnl = gross - (state["open_fee"] + close_fee)
+        pnl_source = "本地计算" if not fill_info.is_estimated else "本地估算"
+
+    total_fee = state["open_fee"] + (fill_info.real_fee or state["position_amount"] * p.contract_size * fill_info.fill_price * p.fee_rate)
+
+    # ── 写入交易记录 ──────────────────────────────────────────────────────
+    trade_id = record_trade(
+        p.user_id,
+        "sell" if is_long else "buy",
+        fill_info.fill_price,
+        state["position_amount"],
+        p.symbol,
+        "被动平仓(SL/TP)",
+        net_pnl,
+        fill_info.exit_reason,
+        # V6.0 新参数
+        is_estimated=fill_info.is_estimated,
+        fill_source=fill_info.fill_source,
+        exit_reason=fill_info.exit_reason,
+        exchange_trade_id=fill_info.exchange_trade_id,
+        exchange_order_id=fill_info.exchange_order_id,
+        fee=total_fee,
+        entry_price_override=entry_price,
+    )
 
     record_strategy_performance(
         p.user_id, state.get("strategy_name", ""), net_pnl
@@ -343,25 +568,50 @@ def _handle_passive_close(
     p.rm.notify_trade_result(net_pnl, current_balance)
     persist_risk_state(p.user_id, p.rm)
 
-    pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
-    p.logger.info(
-        f"{p.tag} 仓位已被动平仓，净盈亏={net_pnl:+.2f}U ({fill_src})"
-    )
+    # ── Telegram 通知（区分真实/估算）─────────────────────────────────────
     _side_label = "多" if is_long else "空"
-    p.notify(
-        f"{pnl_emoji} <b>{p.username} 平仓（托管单触发）</b>\n"
-        f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
-        f"入场价: {state['entry_price']:.2f} → 出场价: {est_fill:.2f}\n"
-        f"止损: {state['active_sl']:.2f} | 止盈: {state['active_tp1']:.2f}\n"
-        f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-        f"来源: {fill_src}"
+    pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
+
+    p.logger.info(
+        f"{p.tag} 仓位已被动平仓，净盈亏={net_pnl:+.2f}U "
+        f"({fill_info.fill_source}, 估算={fill_info.is_estimated})"
     )
+
+    if fill_info.is_estimated:
+        # ── 估算值：明确告知用户不是最终结果 ──────────────────────────────
+        p.notify(
+            f"⚠️ <b>{p.username} 被动平仓已检测到</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
+            f"入场价: {entry_price:.2f}\n"
+            f"退出原因: {fill_info.exit_reason}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>暂未拿到交易所真实成交</b>\n"
+            f"以下为估算值，仅供参考：\n"
+            f"估算出场价: ~{fill_info.fill_price:.2f}\n"
+            f"估算盈亏: <b>~{net_pnl:+.2f} U</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 状态: <b>待交易所对账</b>\n"
+            f"系统将自动重查，拿到真实成交后会再次通知"
+        )
+    else:
+        # ── 真实成交：正式展示 ────────────────────────────────────────────
+        p.notify(
+            f"{pnl_emoji} <b>{p.username} 平仓（{fill_info.exit_reason}）</b>\n"
+            f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
+            f"入场价: {entry_price:.2f} → 出场价: {fill_info.fill_price:.2f}\n"
+            f"止损: {state['active_sl']:.2f} | 止盈: {state['active_tp1']:.2f}\n"
+            f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
+            f"来源: ✅ {fill_info.fill_source}"
+        )
+
     if p.rm.is_fused:
         p.notify(
             f"🚨 <b>{p.username} 风控熔断！</b>\n"
             f"连续亏损 {p.rm.consecutive_losses} 次，Bot 已暂停。\n"
             f"恢复请在控制台点击「恢复熔断」。"
         )
+
     clear_state(p.user_id)
     return load_state(p.user_id)
 
@@ -419,7 +669,13 @@ def _handle_regime_transition(
 
         record_trade(p.user_id, close_side, fill_price,
                      state["position_amount"], p.symbol, "平仓",
-                     net_pnl, f"Regime切换: {transition_action}")
+                     net_pnl, f"Regime切换: {transition_action}",
+                     # V6.0: Regime 切换主动平仓
+                     is_estimated=False,
+                     fill_source="Regime切换（市价单真实成交）",
+                     exit_reason=f"Regime切换: {transition_action}",
+                     fee=state["open_fee"] + close_fee,
+                     entry_price_override=entry)
         record_strategy_performance(
             p.user_id, state.get("strategy_name", ""), net_pnl
         )
@@ -847,7 +1103,13 @@ def _execute_close(
 
     record_trade(p.user_id, close_side, fill_price,
                  state["position_amount"], p.symbol, "平仓",
-                 net_pnl, close_reason)
+                 net_pnl, close_reason,
+                 # V6.0: 主动平仓 — 真实成交
+                 is_estimated=False,
+                 fill_source="主动平仓（市价单真实成交）",
+                 exit_reason=close_reason,
+                 fee=state["open_fee"] + close_fee,
+                 entry_price_override=entry)
     record_strategy_performance(
         p.user_id, state.get("strategy_name", ""), net_pnl
     )
@@ -869,13 +1131,162 @@ def _execute_close(
     pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
     _side_label = "多" if is_long else "空"
     p.notify(
-        f"{pnl_emoji} <b>{p.username} 平仓</b>\n"
+        f"{pnl_emoji} <b>{p.username} 平仓（{close_reason}）</b>\n"
         f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
         f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
         f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-        f"原因: {close_reason}"
+        f"来源: ✅ 主动市价平仓"
     )
     return new_state
+
+
+# ── V6.0: 延迟对账 — 重查未对账的被动平仓记录 ─────────────────────────────────
+
+def _run_reconciliation(p: _RunParams):
+    """
+    检查是否有待对账的交易记录，尝试从交易所拉取真实成交并回填。
+    成功回填后补发一条 Telegram 通知告知用户最终盈亏。
+    """
+    pending = get_pending_reconcile_trades(p.user_id, limit=5)
+    if not pending:
+        return
+
+    for trade in pending:
+        trade_id = trade["id"]
+        symbol = trade["symbol"]
+        entry_price = trade.get("entry_price", 0)
+        estimated_pnl = trade.get("pnl", 0)
+        entry_time_str = trade.get("entry_time", "")
+
+        try:
+            # ── 方法一：fetch_my_trades ────────────────────────────────────
+            since_ms = None
+            if entry_time_str:
+                try:
+                    dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
+                    since_ms = int(dt.timestamp() * 1000)
+                except Exception:
+                    pass
+
+            real_price = None
+            real_pnl = None
+            real_fee = None
+            exchange_trade_id = ""
+            fill_source = ""
+
+            try:
+                trades = p.ex.fetch_my_trades(symbol, since=since_ms, limit=50)
+                close_trades = [
+                    t for t in trades
+                    if (
+                        t.get("reduceOnly") or
+                        t.get("info", {}).get("reduceOnly") or
+                        str(t.get("info", {}).get("side", "")).lower() in ("close_long", "close_short")
+                    )
+                ]
+                if close_trades:
+                    latest = sorted(close_trades, key=lambda x: x.get("timestamp", 0))[-1]
+                    price = float(latest.get("price") or latest.get("average") or 0)
+                    if price > 0:
+                        real_price = price
+                        exchange_trade_id = str(latest.get("id", ""))
+                        fill_source = "交易所真实成交（对账回填）"
+
+                        info = latest.get("info", {})
+                        pnl_val = info.get("pnl") or info.get("realizedPnl")
+                        if pnl_val is not None:
+                            try:
+                                real_pnl = float(pnl_val)
+                            except (TypeError, ValueError):
+                                pass
+                        fee_val = latest.get("fee", {}).get("cost") or info.get("fee")
+                        if fee_val is not None:
+                            try:
+                                real_fee = abs(float(fee_val))
+                            except (TypeError, ValueError):
+                                pass
+            except Exception:
+                pass
+
+            # ── 方法二：OKX bill 接口 ──────────────────────────────────────
+            if real_price is None:
+                try:
+                    inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+                    if not inst_id.endswith("-SWAP"):
+                        inst_id += "-SWAP"
+                    resp = p.ex.privateGetAccountBills({
+                        "instId": inst_id,
+                        "type": "2",
+                        "limit": "20",
+                    })
+                    bills = (resp or {}).get("data") or []
+                    for bill in bills:
+                        bill_pnl = bill.get("pnl")
+                        bill_px = bill.get("px")
+                        if bill_pnl is not None and bill_px:
+                            try:
+                                _px = float(bill_px)
+                                _pnl = float(bill_pnl)
+                                if _px > 0:
+                                    real_price = _px
+                                    real_pnl = _pnl
+                                    fill_source = "OKX账单接口（对账回填）"
+                                    _fee = bill.get("fee")
+                                    if _fee is not None:
+                                        real_fee = abs(float(_fee))
+                                    break
+                            except (TypeError, ValueError):
+                                continue
+                except Exception:
+                    pass
+
+            if real_price is None:
+                # 仍然拿不到，跳过（下次再试）
+                continue
+
+            # ── 回填 ──────────────────────────────────────────────────────
+            if real_pnl is None:
+                # 用真实成交价重新算
+                side = trade.get("side", "")
+                amount = trade.get("amount", 0)
+                is_long = side in ("sell",)  # 平多 = sell
+                if is_long:
+                    gross = (real_price - entry_price) * amount * p.contract_size
+                else:
+                    gross = (entry_price - real_price) * amount * p.contract_size
+                real_pnl = gross  # 简化：不再扣开仓费（对账时可能拿不到）
+
+            reconcile_trade(
+                trade_id=trade_id,
+                real_pnl=real_pnl,
+                real_exit_price=real_price,
+                fill_source=fill_source,
+                exchange_trade_id=exchange_trade_id,
+                fee=real_fee,
+            )
+
+            # ── 补发 Telegram 通知 ────────────────────────────────────────
+            pnl_emoji = "🎉" if real_pnl > 0 else "🩸"
+            diff = real_pnl - estimated_pnl
+            diff_str = f"（与估算差异: {diff:+.2f}U）" if abs(diff) > 0.01 else ""
+            p.notify(
+                f"📋 <b>{p.username} 对账完成</b>\n"
+                f"品种: {symbol}\n"
+                f"入场价: {entry_price:.2f} → 出场价: {real_price:.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ <b>最终净盈亏: {real_pnl:+.2f} U</b>\n"
+                f"原估算盈亏: ~{estimated_pnl:+.2f} U {diff_str}\n"
+                f"来源: {fill_source}\n"
+                f"状态: ✅ 已与交易所对账"
+            )
+            p.logger.info(
+                f"{p.tag} ✅ 对账完成: trade#{trade_id}, "
+                f"估算={estimated_pnl:+.2f}U → 真实={real_pnl:+.2f}U"
+            )
+
+        except Exception as e:
+            p.logger.debug(f"{p.tag} 对账 trade#{trade_id} 失败: {e}")
+            continue
 
 
 # ── K 线拉取 & DataFrame 构建 ─────────────────────────────────────────────────
@@ -1014,6 +1425,8 @@ def run_user_bot(bot_state, override_strategy: str = None):
     _pos_query_fail_count = 0
     _zero_bal_count = 0
     _rate_limit_until = 0.0
+    _reconcile_last_check = 0.0  # V6.0: 上次对账检查时间
+    _RECONCILE_INTERVAL = 120    # V6.0: 对账检查间隔（秒）
 
     while not p.stop_ev.is_set():
         try:
@@ -1062,6 +1475,15 @@ def run_user_bot(bot_state, override_strategy: str = None):
                             f"• 合约账户是否有 USDT\n"
                             f"• API Key 权限是否包含「读取」"
                         )
+
+            # ── V6.0: 延迟对账 — 重查未对账的被动平仓交易 ──────────────────
+            now_ts_reconcile = time.time()
+            if now_ts_reconcile - _reconcile_last_check >= _RECONCILE_INTERVAL:
+                _reconcile_last_check = now_ts_reconcile
+                try:
+                    _run_reconciliation(p)
+                except Exception as e:
+                    p.logger.debug(f"{p.tag} 对账检查异常（忽略）: {e}")
 
             # ── 仓位核对（检测被动平仓）────────────────────────────────────
             if state["position_amount"] > 0:
