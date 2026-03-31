@@ -40,6 +40,7 @@ from core.user_bot.bot_context import (
     persist_risk_state, restore_risk_state, resolve_config,
     load_notifier, record_strategy_performance, get_strategy_win_rate,
 )
+from core.user_bot.daily_report import DailyReporter
 from core.user_bot.exchange_ops import (
     get_swap_usdt, detect_pos_mode, fetch_ohlcv_safe,
     place_algo, cancel_all_algo, live_position_amount,
@@ -90,20 +91,20 @@ class PassiveFillResult:
         self.exchange_order_id = ""
         self.real_pnl = None       # 交易所返回的已实现盈亏（如有）
         self.real_fee = None       # 交易所返回的手续费（如有）
-        self.exit_reason = "被动平仓（原因待确认）"
+        self.exit_reason = "被动平仓（原因待确认＄1�7"
 
 
 def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> PassiveFillResult:
     """
-    V6.0: 从交易所拉取被动平仓的真实成交信息。
+    V6.0: 从交易所拉取被动平仓的真实成交信息��1�7
 
     优先级：
-      1. fetch_my_trades → 找到 reduceOnly / close_long / close_short 的成交
-      2. fetch_order → 用存储的 SL/TP 条件单 ID 查询成交结果
-      3. OKX 原始 bill 接口 → 查已实现盈亏
-      4. Fallback: 用 SL/TP 价格估算（明确标记为估算）
+      1. fetch_my_trades ↄ1�7 找到 reduceOnly / close_long / close_short 的成亄1�7
+      2. fetch_order ↄ1�7 用存储的 SL/TP 条件卄1�7 ID 查询成交结果
+      3. OKX 原始 bill 接口 ↄ1�7 查已实现盈亏
+      4. Fallback: 甄1�7 SL/TP 价格估算（明确标记为估算＄1�7
 
-    返回 PassiveFillResult 对象，调用方根据 .is_estimated 决定展示方式。
+    返回 PassiveFillResult 对象，调用方根据 .is_estimated 决定展示方式〄1�7
     """
     result = PassiveFillResult()
     _log = logger
@@ -132,7 +133,7 @@ def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> Passi
             price = float(latest.get("price") or latest.get("average") or 0)
             if price > 0:
                 result.fill_price = price
-                result.fill_source = "交易所真实成交（fetch_my_trades）"
+                result.fill_source = "交易扢�真实成交（fetch_my_trades＄1�7"
                 result.is_estimated = False
                 result.exchange_trade_id = str(latest.get("id", ""))
                 result.exchange_order_id = str(latest.get("order", ""))
@@ -156,7 +157,7 @@ def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> Passi
                 result.exit_reason = _infer_exit_reason_from_trades(state, price, close_trades)
 
                 if _log:
-                    _log.info(f"✅ 真实成交: price={price}, trade_id={result.exchange_trade_id}, "
+                    _log.info(f"✄1�7 真实成交: price={price}, trade_id={result.exchange_trade_id}, "
                               f"pnl={result.real_pnl}, fee={result.real_fee}")
                 return result
     except Exception as e:
@@ -177,7 +178,7 @@ def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> Passi
                     fill = float(order.get("average") or order.get("price") or 0)
                     if fill > 0:
                         result.fill_price = fill
-                        result.fill_source = f"条件单{order_type}成交（fetch_order）"
+                        result.fill_source = f"条件单{order_type}成交（fetch_order＄1�7"
                         result.is_estimated = False
                         result.exchange_order_id = str(order_id)
                         result.exit_reason = f"{order_type}触发"
@@ -193,7 +194,7 @@ def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> Passi
                                 pass
 
                         if _log:
-                            _log.info(f"✅ 条件单成交: {order_type}, price={fill}, "
+                            _log.info(f"✄1�7 条件单成亄1�7: {order_type}, price={fill}, "
                                       f"order_id={order_id}")
                         return result
             except Exception:
@@ -222,7 +223,7 @@ def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> Passi
                     _pnl = float(bill_pnl)
                     if _px > 0:
                         result.fill_price = _px
-                        result.fill_source = "OKX账单接口（privateGetAccountBills）"
+                        result.fill_source = "OKX账单接口（privateGetAccountBills＄1�7"
                         result.is_estimated = False
                         result.real_pnl = _pnl
                         result.exchange_order_id = str(bill.get("ordId", ""))
@@ -233,7 +234,7 @@ def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> Passi
 
                         result.exit_reason = _infer_exit_reason_from_price(state, _px)
                         if _log:
-                            _log.info(f"✅ OKX bill 接口成交: price={_px}, pnl={_pnl}")
+                            _log.info(f"✄1�7 OKX bill 接口成交: price={_px}, pnl={_pnl}")
                         return result
                 except (TypeError, ValueError):
                     continue
@@ -256,7 +257,7 @@ def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> Passi
         fill = active_sl if active_sl > 0 else entry
 
     result.fill_price = fill
-    result.fill_source = "⚠️ 近似估算（未拿到交易所真实成交）"
+    result.fill_source = "⚠️ 近似估算（未拿到交易扢�真实成交＄1�7"
     result.is_estimated = True
     result.exit_reason = _infer_exit_reason_from_price(state, fill)
 
@@ -267,7 +268,7 @@ def _fetch_passive_fill_info(ex, symbol: str, state: dict, logger=None) -> Passi
 
 
 def _infer_exit_reason_from_trades(state: dict, fill_price: float, trades: list) -> str:
-    """根据成交价和 SL/TP 价格推断退出原因。"""
+    """根据成交价和 SL/TP 价格推断逢�出原因��1�7"""
     is_long = state.get("position_side") == "long"
     active_sl = state.get("active_sl", 0)
     active_tp = state.get("active_tp1", 0)
@@ -301,11 +302,11 @@ def _infer_exit_reason_from_trades(state: dict, fill_price: float, trades: list)
         elif not is_long and fill_price >= active_sl * 0.995:
             return "止损触发"
 
-    return "被动平仓（原因待确认）"
+    return "被动平仓（原因待确认＄1�7"
 
 
 def _infer_exit_reason_from_price(state: dict, fill_price: float) -> str:
-    """仅基于 fill_price 和 state 中的 SL/TP 推断退出原因。"""
+    """仅基亄1�7 fill_price 咄1�7 state 中的 SL/TP 推断逢�出原因��1�7"""
     is_long = state.get("position_side") == "long"
     active_sl = state.get("active_sl", 0)
     active_tp = state.get("active_tp1", 0)
@@ -326,15 +327,15 @@ def _infer_exit_reason_from_price(state: dict, fill_price: float) -> str:
     elif active_sl > 0:
         return "止损触发（推断）"
 
-    return "被动平仓（原因待确认）"
+    return "被动平仓（原因待确认＄1�7"
 
 
 # ── 订单对账：Bot 启动时核对 SL/TP 条件单是否仍存在 ─────────────────────────────
 
 def _reconcile_orders(ex, symbol: str, state: dict, logger, notify, tag: str):
     """
-    Bot 启动时调用：若本地记录了持仓但条件单可能已失效，重新核查并补挂。
-    返回修正后的 state。
+    Bot 启动时调用：若本地记录了持仓但条件单可能已失效，重新核查并补挂��1�7
+    返回修正后的 state〄1�7
     """
     if state["position_amount"] <= 0:
         return state
@@ -359,10 +360,10 @@ def _reconcile_orders(ex, symbol: str, state: dict, logger, notify, tag: str):
         logger.info(f"{tag} 订单对账：SL/TP 条件单均正常")
         return state
 
-    logger.warning(f"{tag} 订单对账：SL alive={sl_alive}, TP alive={tp_alive}，尝试补挂")
+    logger.warning(f"{tag} 订单对账：SL alive={sl_alive}, TP alive={tp_alive}，尝试补挄1�7")
     notify(
         f"⚠️ <b>{tag} 订单对账异常</b>\n"
-        f"SL存活: {sl_alive} | TP存活: {tp_alive}\n正在补挂条件单..."
+        f"SL存活: {sl_alive} | TP存活: {tp_alive}\n正在补挂条件卄1�7..."
     )
 
     is_long    = state["position_side"] == "long"
@@ -377,8 +378,8 @@ def _reconcile_orders(ex, symbol: str, state: dict, logger, notify, tag: str):
             state["exchange_order_ids"]["sl_order"] = new_sl.get("id")
             logger.info(f"{tag} SL 条件单已补挂")
         else:
-            logger.error(f"{tag} ⚠️ SL 补挂失败！请人工检查！")
-            notify(f"🚨 <b>{tag} SL 补挂失败</b>，请立即人工检查持仓！")
+            logger.error(f"{tag} ⚠️ SL 补挂失败！请人工棢�查！")
+            notify(f"🚨 <b>{tag} SL 补挂失败</b>，请立即人工棢�查持仓！")
 
     if not tp_alive and state["active_tp1"] > 0:
         new_tp = place_algo(ex, symbol, close_side, amount,
@@ -398,11 +399,11 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
                       close_side: str, pos_side_str: str,
                       logger, notify, tag: str, user_id: int):
     """
-    V2.5 追踪止损逻辑：
-    1. 盈利达到 ATR * trigger_mult 后激活追踪
-    2. 价格回撤 ATR * distance_mult 时更新 SL 到最优价 - distance
+    V2.5 追踪止损逻辑＄1�7
+    1. 盈利达到 ATR * trigger_mult 后激活追踄1�7
+    2. 价格回撤 ATR * distance_mult 时更斄1�7 SL 到最优价 - distance
 
-    修改 state（in-place），不直接平仓，只调整交易所 SL 条件单。
+    修改 state（in-place），不直接平仓，只调整交易所 SL 条件单��1�7
     """
     try:
         close = df['close']
@@ -430,7 +431,7 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
     if not state.get("trailing_stop_active"):
         state["trailing_stop_active"] = True
         state["trailing_stop_best_price"] = current_price
-        logger.info(f"{tag} ✅ Trailing Stop 已激活，盈利={profit_points:.2f} > 触发={trigger_level:.2f}")
+        logger.info(f"{tag} ✄1�7 Trailing Stop 已激活，盈利={profit_points:.2f} > 触发={trigger_level:.2f}")
 
     best = state.get("trailing_stop_best_price", entry)
     if is_long:
@@ -475,8 +476,8 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
                 "tp_order": tp_ord.get("id") if tp_ord else None,
             }
             logger.info(
-                f"{tag} 📈 Trailing Stop 更新: SL {old_sl:.2f} → {new_sl:.2f} "
-                f"(最优价={best:.2f}, 回撤距离={trail_distance:.2f})"
+                f"{tag} 📈 Trailing Stop 更新: SL {old_sl:.2f} ↄ1�7 {new_sl:.2f} "
+                f"(朢�优价={best:.2f}, 回撤距离={trail_distance:.2f})"
             )
         except Exception as e:
             logger.warning(f"{tag} Trailing Stop 更新SL失败: {e}")
@@ -485,7 +486,7 @@ def _do_trailing_stop(state: dict, current_price: float, is_long: bool,
 # ── 运行时参数容器 ─────────────────────────────────────────────────────────────
 
 class _RunParams:
-    """将主循环中大量传递的参数收集到一个对象，减少函数签名长度。"""
+    """将主循环中大量传递的参数收集到一个对象，减少函数签名长度〄1�7"""
     __slots__ = (
         'user_id', 'username', 'rm', 'stop_ev', 'logger', 'notify', 'tag',
         'ex', 'cfg', 'symbol', 'timeframe', 'leverage', 'contract_size',
@@ -493,6 +494,9 @@ class _RunParams:
         'use_auto', 'selector', 'strategy',
         'trailing_stop_enable', 'trailing_stop_trigger', 'trailing_stop_distance',
         'time_stop_bars', 'time_stop_enable', 'dynamic_position_enable',
+        'exit_ema_period',
+        # V10.0: Macro trend filter
+        'macro_ema_period', 'macro_long_only',
         # V7.0: 平仓冷静期 & 插针过滤
         'post_close_cooldown_bars', 'post_stoploss_cooldown_bars',
         'post_passive_cooldown_bars', 'post_takeprofit_cooldown_bars',
@@ -509,10 +513,10 @@ def _handle_passive_close(
     p: _RunParams, state: dict, live_amt: float, usdt_free: float,
 ) -> dict | None:
     """
-    V6.0 重构：检测到交易所实际持仓为 0（条件单已触发），处理被动平仓。
-    - 优先拿真实成交 → 记录真实盈亏
-    - 拿不到真实成交 → 明确标记为估算，通知用户待对账
-    返回更新后的 state；若未触发被动平仓，返回 None。
+    V6.0 重构：检测到交易扢�实际持仓丄1�7 0（条件单已触发），处理被动平仓��1�7
+    - 优先拿真实成亄1�7 ↄ1�7 记录真实盈亏
+    - 拿不到真实成亄1�7 ↄ1�7 明确标记为估算，通知用户待对贄1�7
+    返回更新后的 state；若未触发被动平仓，返回 None〄1�7
     """
     if live_amt != 0.0:
         return None
@@ -532,7 +536,7 @@ def _handle_passive_close(
             # 如果 real_pnl 是毛利润，需要减去手续费
             # OKX bill 接口的 pnl 通常已包含手续费
             pass
-        pnl_source = "交易所已实现盈亏"
+        pnl_source = "交易扢�已实现盈亄1�7"
     else:
         # 计算盈亏（可能是真实成交价 or 估算价）
         gross = (
@@ -576,11 +580,11 @@ def _handle_passive_close(
     persist_risk_state(p.user_id, p.rm)
 
     # ── Telegram 通知（区分真实/估算）─────────────────────────────────────
-    _side_label = "多" if is_long else "空"
+    _side_label = "处1�7" if is_long else "穄1�7"
     pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
 
     p.logger.info(
-        f"{p.tag} 仓位已被动平仓，净盈亏={net_pnl:+.2f}U "
+        f"{p.tag} 仓位已被动平仓，凢�盈亏={net_pnl:+.2f}U "
         f"({fill_info.fill_source}, 估算={fill_info.is_estimated})"
     )
 
@@ -590,35 +594,35 @@ def _handle_passive_close(
             f"⚠️ <b>{p.username} 被动平仓已检测到</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
-            f"入场价: {entry_price:.2f}\n"
-            f"退出原因: {fill_info.exit_reason}\n"
+            f"入场仄1�7: {entry_price:.2f}\n"
+            f"逢�出原囄1�7: {fill_info.exit_reason}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>暂未拿到交易所真实成交</b>\n"
-            f"以下为估算值，仅供参考：\n"
-            f"估算出场价: ~{fill_info.fill_price:.2f}\n"
+            f"⚠️ <b>暂未拿到交易扢�真实成交</b>\n"
+            f"以下为估算��，仅供参��：\n"
+            f"估算出场仄1�7: ~{fill_info.fill_price:.2f}\n"
             f"估算盈亏: <b>~{net_pnl:+.2f} U</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📋 状态: <b>待交易所对账</b>\n"
+            f"📋 状��1�7: <b>待交易所对账</b>\n"
             f"系统将自动重查，拿到真实成交后会再次通知\n"
-            f"🧊 已进入冷静期，不会立即重新开仓"
+            f"🧊 已进入冷静期，不会立即重新开仄1�7"
         )
     else:
         # ── 真实成交：正式展示 ────────────────────────────────────────────
         p.notify(
-            f"{pnl_emoji} <b>{p.username} 平仓（{fill_info.exit_reason}）</b>\n"
+            f"{pnl_emoji} <b>{p.username} 平仓（{fill_info.exit_reason}＄1�7</b>\n"
             f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
-            f"入场价: {entry_price:.2f} → 出场价: {fill_info.fill_price:.2f}\n"
+            f"入场仄1�7: {entry_price:.2f} ↄ1�7 出场仄1�7: {fill_info.fill_price:.2f}\n"
             f"止损: {state['active_sl']:.2f} | 止盈: {state['active_tp1']:.2f}\n"
-            f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-            f"来源: ✅ {fill_info.fill_source}\n"
-            f"🧊 已进入冷静期，不会立即重新开仓"
+            f"凢�盈亏: <b>{net_pnl:+.2f} U</b>\n"
+            f"来源: ✄1�7 {fill_info.fill_source}\n"
+            f"🧊 已进入冷静期，不会立即重新开仄1�7"
         )
 
     if p.rm.is_fused:
         p.notify(
-            f"🚨 <b>{p.username} 风控熔断！</b>\n"
-            f"连续亏损 {p.rm.consecutive_losses} 次，Bot 已暂停。\n"
-            f"恢复请在控制台点击「恢复熔断」。"
+            f"🚨 <b>{p.username} 风控熔断＄1�7</b>\n"
+            f"连续亏损 {p.rm.consecutive_losses} 次，Bot 已暂停��\n"
+            f"恢复请在控制台点击��恢复熔断����1�7"
         )
 
     # V7.0: 保存平仓信息用于冷静期
@@ -642,8 +646,8 @@ def _handle_regime_transition(
     current_price: float,
 ) -> dict:
     """
-    V4.0 Regime 切换旧仓管理：方向性切换时收紧止损或平掉旧仓。
-    返回可能更新后的 state。
+    V4.0 Regime 切换旧仓管理：方向��切换时收紧止损或平掉旧仓��1�7
+    返回可能更新后的 state〄1�7
     """
     transition_action = regime_result.get("transition_action")
     transition_urgency = regime_result.get("transition_urgency", 0.0)
@@ -691,7 +695,7 @@ def _handle_regime_transition(
                      net_pnl, f"Regime切换: {transition_action}",
                      # V6.0: Regime 切换主动平仓
                      is_estimated=False,
-                     fill_source="Regime切换（市价单真实成交）",
+                     fill_source="Regime切换（市价单真实成交＄1�7",
                      exit_reason=f"Regime切换: {transition_action}",
                      fee=state["open_fee"] + close_fee,
                      entry_price_override=entry)
@@ -703,18 +707,18 @@ def _handle_regime_transition(
         persist_risk_state(p.user_id, p.rm)
 
         pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
-        _side_label = "多" if is_long else "空"
+        _side_label = "处1�7" if is_long else "穄1�7"
         p.logger.info(
-            f"{p.tag} ⚡ Regime切换平仓: {transition_action}, "
-            f"净盈亏={net_pnl:+.2f}U, 紧急度={transition_urgency:.2f}"
+            f"{p.tag} ⚄1�7 Regime切换平仓: {transition_action}, "
+            f"凢�盈亏={net_pnl:+.2f}U, 紧��度={transition_urgency:.2f}"
         )
         p.notify(
             f"{pnl_emoji} <b>{p.username} Regime切换平仓</b>\n"
             f"品种: {p.symbol} | 方向: {_side_label}\n"
-            f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
-            f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-            f"操作: {transition_action} | 紧急度: {transition_urgency:.0%}\n"
-            f"🧊 已进入冷静期，不会立即重新开仓"
+            f"入场仄1�7: {entry:.2f} ↄ1�7 出场仄1�7: {fill_price:.2f}\n"
+            f"凢�盈亏: <b>{net_pnl:+.2f} U</b>\n"
+            f"操作: {transition_action} | 紧��度: {transition_urgency:.0%}\n"
+            f"🧊 已进入冷静期，不会立即重新开仄1�7"
         )
         clear_state(p.user_id)
         state = load_state(p.user_id)
@@ -736,7 +740,7 @@ def _handle_regime_transition(
 
 
 def _tighten_sl_on_regime_switch(p: _RunParams, state: dict, is_long: bool) -> dict:
-    """Regime 切换时收紧止损：将 SL 向入场价方向移动。"""
+    """Regime 切换时收紧止损：射1�7 SL 向入场价方向移动〄1�7"""
     if state["active_sl"] <= 0 or state["entry_price"] <= 0:
         return state
 
@@ -769,7 +773,7 @@ def _tighten_sl_on_regime_switch(p: _RunParams, state: dict, is_long: bool) -> d
         "tp_order": tp_ord.get("id") if tp_ord else None,
     }
     save_state(p.user_id, state)
-    p.logger.info(f"{p.tag} ⚡ Regime切换收紧SL: {old_sl:.2f} → {new_sl:.2f}")
+    p.logger.info(f"{p.tag} ⚄1�7 Regime切换收紧SL: {old_sl:.2f} ↄ1�7 {new_sl:.2f}")
     return state
 
 
@@ -777,12 +781,12 @@ def _tighten_sl_on_regime_switch(p: _RunParams, state: dict, is_long: bool) -> d
 
 def _detect_spike(df, p: _RunParams) -> dict:
     """
-    V7.0: 检测最近 K 线是否存在插针/异常波动。
+    V7.0: 棢�测最迄1�7 K 线是否存在插钄1�7/异常波动〄1�7
 
-    检测逻辑：
-      1. 单根 K 线振幅 > ATR × spike_atr_mult → 异常大振幅
-      2. 上下影线占比 > spike_wick_ratio → 典型插针（实体小、影线长）
-      3. ATR 突增（当前 ATR > 近期均值 × spike_atr_mult）→ 波动率飙升
+    棢�测��辑＄1�7
+      1. 单根 K 线振幄1�7 > ATR × spike_atr_mult ↄ1�7 异常大振幄1�7
+      2. 上下影线占比 > spike_wick_ratio ↄ1�7 典型插针（实体小、影线长＄1�7
+      3. ATR 突增（当剄1�7 ATR > 近期均��1�7 × spike_atr_mult）→ 波动率飙卄1�7
 
     返回: {
         "is_spike": bool,
@@ -869,8 +873,8 @@ def _detect_spike(df, p: _RunParams) -> dict:
         else:
             result["spike_type"] = "atr_surge"
         result["detail"] = (
-            f"检测到{len(spike_bars)}根异常K线: "
-            f"类型={result['spike_type']}, 严重度={max_severity:.2f}"
+            f"棢�测到{len(spike_bars)}根异常K纄1�7: "
+            f"类型={result['spike_type']}, 严重庄1�7={max_severity:.2f}"
         )
 
     return result
@@ -878,10 +882,10 @@ def _detect_spike(df, p: _RunParams) -> dict:
 
 def _check_reentry_volatility(df, p: _RunParams) -> tuple[bool, str]:
     """
-    V7.0: 检查当前波动率是否已回落到可接受水平。
+    V7.0: 棢�查当前波动率是否已回落到可接受水平��1�7
 
     返回: (is_settled, detail_str)
-      - is_settled=True: 波动率已回落，可以考虑开仓
+      - is_settled=True: 波动率已回落，可以��虑弢�仄1�7
       - is_settled=False: 波动率仍然偏高，建议等待
     """
     if df is None or len(df) < 30:
@@ -908,7 +912,7 @@ def _check_reentry_volatility(df, p: _RunParams) -> tuple[bool, str]:
     if atr_ratio > p.reentry_volatility_settle_mult:
         return False, (
             f"波动率仍偏高: 当前ATR/基准ATR={atr_ratio:.2f} "
-            f"> 阈值{p.reentry_volatility_settle_mult:.1f}"
+            f"> 阈��{p.reentry_volatility_settle_mult:.1f}"
         )
 
     # 检查最近 N 根 K 线是否稳定（无极端波动）
@@ -923,7 +927,7 @@ def _check_reentry_volatility(df, p: _RunParams) -> tuple[bool, str]:
             continue
         if bar_atr > 0 and bar_range / bar_atr > p.spike_atr_mult * 0.8:
             return False, (
-                f"最近K线仍有异常波动: bar[{i}] 振幅/ATR={bar_range/bar_atr:.2f}"
+                f"朢�近K线仍有异常波劄1�7: bar[{i}] 振幅/ATR={bar_range/bar_atr:.2f}"
             )
 
     return True, f"波动率已回落: ATR比率={atr_ratio:.2f}"
@@ -933,18 +937,18 @@ def _check_cooldown_and_reentry(
     p: _RunParams, state: dict, signal: dict, df,
 ) -> tuple[bool, str]:
     """
-    V7.0: 开仓前的综合门禁检查。
+    V7.0: 弢�仓前的综合门禁检查��1�7
 
-    检查顺序：
-      1. 平仓后冷静期（基于 K 线数）
-      2. 插针冷静期（基于时间）
-      3. 同方向追击抑制
-      4. 波动率回落确认
-      5. 插针实时检测
+    棢�查顺序：
+      1. 平仓后冷静期（基亄1�7 K 线数＄1�7
+      2. 插针冷静期（基于时间＄1�7
+      3. 同方向追击抑刄1�7
+      4. 波动率回落确讄1�7
+      5. 插针实时棢�浄1�7
 
     返回: (can_open, reason)
-      - can_open=True: 允许开仓
-      - can_open=False: 拒绝开仓, reason 说明拒绝原因
+      - can_open=True: 允许弢�仄1�7
+      - can_open=False: 拒绝弢�仄1�7, reason 说明拒绝原因
     """
     now = datetime.now()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -954,7 +958,7 @@ def _check_cooldown_and_reentry(
     if cooldown_remaining > 0:
         last_reason = state.get("last_close_reason", "")
         return False, (
-            f"🧊 平仓冷静期中: 剩余{cooldown_remaining}根K线 "
+            f"🧊 平仓冷静期中: 剩余{cooldown_remaining}根K纄1�7 "
             f"(上次: {last_reason})"
         )
 
@@ -967,7 +971,7 @@ def _check_cooldown_and_reentry(
                 remaining_min = (spike_until - now).total_seconds() / 60
                 return False, (
                     f"🧊 插针冷静期中: 还需等待{remaining_min:.0f}分钟 "
-                    f"(检测到异常波动)"
+                    f"(棢�测到异常波动)"
                 )
         except (ValueError, TypeError):
             pass
@@ -986,8 +990,8 @@ def _check_cooldown_and_reentry(
                     sig_dir = "long" if sig_action == "BUY" else "short" if sig_action == "SELL" else ""
                     if sig_dir == last_side:
                         return False, (
-                            f"🧊 同方向追击抑制: 上次{last_side}平仓仅过{hours_since:.1f}h, "
-                            f"禁止同方向立即重开"
+                            f"🧊 同方向追击抑刄1�7: 上次{last_side}平仓仅过{hours_since:.1f}h, "
+                            f"禁止同方向立即重弢�"
                         )
             except (ValueError, TypeError):
                 pass
@@ -1019,7 +1023,7 @@ def _check_cooldown_and_reentry(
         state["spike_cooldown_until"] = spike_until.strftime("%Y-%m-%d %H:%M:%S")
         save_state(p.user_id, state)
         return False, (
-            f"🧊 检测到插针/异常波动: {spike_info['detail']}, "
+            f"🧊 棢�测到插针/异常波动: {spike_info['detail']}, "
             f"进入冷静期{cooldown_minutes}分钟"
         )
 
@@ -1031,8 +1035,8 @@ def _set_post_close_cooldown(
     close_reason: str, close_side: str, net_pnl: float,
 ):
     """
-    V7.0: 平仓后在 state 中写入冷静期信息。
-    根据平仓类型选择不同的冷静期长度。
+    V7.0: 平仓后在 state 中写入冷静期信息〄1�7
+    根据平仓类型选择不同的冷静期长度〄1�7
     """
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     state["last_close_time"] = now_str
@@ -1054,14 +1058,14 @@ def _set_post_close_cooldown(
     state["cooldown_bars_remaining"] = cooldown_bars
 
     p.logger.info(
-        f"{p.tag} 🧊 设置平仓冷静期: {cooldown_bars}根K线 "
+        f"{p.tag} 🧊 设置平仓冷静朄1�7: {cooldown_bars}根K纄1�7 "
         f"(原因={close_reason}, 方向={close_side})"
     )
 
 
 def _tick_cooldown(state: dict):
     """
-    V7.0: 每轮主循环调用，递减冷静期剩余 K 线计数。
+    V7.0: 每轮主循环调用，递减冷静期剩佄1�7 K 线计数��1�7
     """
     remaining = state.get("cooldown_bars_remaining", 0)
     if remaining > 0:
@@ -1069,7 +1073,7 @@ def _tick_cooldown(state: dict):
 
 
 def _timeframe_to_minutes(tf: str) -> int:
-    """将 timeframe 字符串转为分钟数。"""
+    """射1�7 timeframe 字符串转为分钟数〄1�7"""
     tf = tf.lower().strip()
     if tf.endswith('m'):
         return int(tf[:-1])
@@ -1084,33 +1088,71 @@ def _timeframe_to_minutes(tf: str) -> int:
 
 # ── 子流程：开仓 ──────────────────────────────────────────────────────────────
 
+
+def _check_macro_filter(p, action: str, df) -> tuple:
+    """
+    V10.0: Macro trend filter using long-term EMA.
+    - Long only when price > EMA(macro_period)
+    - If macro_long_only: block all SELL signals
+    - If not macro_long_only: block SELL when price > EMA, block BUY when price < EMA
+    Returns (blocked: bool, reason: str).
+    """
+    try:
+        close_col = df['close']
+        ema = close_col.ewm(span=p.macro_ema_period, adjust=False).mean()
+        last_close = float(close_col.iloc[-2])
+        ema_val = float(ema.iloc[-2])
+    except Exception:
+        return (False, "")
+
+    if p.macro_long_only:
+        if action == 'SELL':
+            return (True, f"long-only mode, SELL blocked")
+        if action == 'BUY' and last_close < ema_val:
+            return (True, f"BUY blocked: price {last_close:.0f} < EMA({p.macro_ema_period}) {ema_val:.0f}")
+    else:
+        if action == 'BUY' and last_close < ema_val:
+            return (True, f"BUY blocked: price {last_close:.0f} < EMA({p.macro_ema_period}) {ema_val:.0f}")
+        if action == 'SELL' and last_close > ema_val:
+            return (True, f"SELL blocked: price {last_close:.0f} > EMA({p.macro_ema_period}) {ema_val:.0f}")
+
+    return (False, "")
+
 def _handle_open_position(
     p: _RunParams, state: dict, signal: dict,
     current_price: float, usdt_free: float, df,
 ) -> dict | None:
     """
-    空仓时根据信号开仓。
-    返回更新后的 state；若未开仓则返回 None。
+    空仓时根据信号开仓��1�7
+    返回更新后的 state；若未开仓则返回 None〄1�7
 
-    V5.1: 拒绝理由透明化 — 所有跳过开仓的分支都输出具体数值对比。
-    V7.0: 平仓冷静期 + 插针过滤 + 再入场门禁。
+    V5.1: 拒绝理由透明匄1�7  1�7 扢�有跳过开仓的分支都输出具体数值对比��1�7
+    V7.0: 平仓冷静朄1�7 + 插针过滤 + 再入场门禁��1�7
     """
     action = signal["action"]
     if state["position_amount"] != 0 or action not in ("BUY", "SELL"):
         return None
 
     # ── V7.0: 冷静期 & 再入场门禁 ────────────────────────────────────────────
+    if p.macro_ema_period > 0:
+        macro_blocked, macro_reason = _check_macro_filter(p, action, df)
+        if macro_blocked:
+            p.logger.info(f"{p.tag} Macro filter: {macro_reason}")
+            return None
+
+
+    # ── V7.0: 冷静期 & 再入场门禁 ────────────────────────────────────────────
     can_open, block_reason = _check_cooldown_and_reentry(p, state, signal, df)
     if not can_open:
-        p.logger.info(f"{p.tag} ❌ 拒绝开仓（冷静期/波动过滤）: {block_reason}")
+        p.logger.info(f"{p.tag} ❄1�7 拒绝弢�仓（冷静朄1�7/波动过滤＄1�7: {block_reason}")
         # V7.1: 去重推送拒绝理由（同类30分钟内只推一次）
         _block_alert_key = f"{p.user_id}:cooldown_block"
         if should_alert(_block_alert_key, 1800):
             p.notify(
-                f"🧊 <b>{p.username} 信号已出但暂缓开仓</b>\n"
+                f"🧊 <b>{p.username} 信号已出但暂缓开仄1�7</b>\n"
                 f"信号: {signal['action']} {p.symbol}\n"
                 f"原因: {block_reason}\n"
-                f"📋 系统在等待更安全的时机"
+                f"📋 系统在等待更安全的时朄1�7"
             )
         return None
 
@@ -1131,7 +1173,7 @@ def _handle_open_position(
 
     if effective_risk != p.risk_pct:
         p.logger.info(
-            f"{p.tag} 📊 动态风险: base={p.risk_pct*100:.2f}% → "
+            f"{p.tag} 📊 动��风附1�7: base={p.risk_pct*100:.2f}% ↄ1�7 "
             f"effective={effective_risk*100:.2f}% "
             f"(回撤×{p.rm.drawdown_scale:.2f} "
             f"equity×{p.rm.equity_curve_scale:.2f} "
@@ -1146,7 +1188,7 @@ def _handle_open_position(
     # V1.5: 策略过渡期半仓
     if p.use_auto and p.selector is not None and p.selector.in_transition:
         contracts = max(1, contracts // 2)
-        p.logger.info(f"{p.tag} ⚠️ 策略过渡期，半仓试探: {contracts} 张")
+        p.logger.info(f"{p.tag} ⚠️ 策略过渡期，半仓试探: {contracts} 弄1�7")
 
     # max_trade_amount 金额上限换算为张数
     denom = current_price * p.contract_size / p.leverage
@@ -1157,7 +1199,7 @@ def _handle_open_position(
 
     if contracts < 1:
         p.logger.info(
-            f"{p.tag} ❌ 拒绝开仓: 仓位计算 <1 张 "
+            f"{p.tag} ❄1�7 拒绝弢�仄1�7: 仓位计算 <1 弄1�7 "
             f"(余额={usdt_free:.2f}U, risk_per={risk_per:.4f}, "
             f"effective_risk={effective_risk*100:.2f}%, SL距离={abs(current_price - target_sl):.2f})"
         )
@@ -1166,10 +1208,10 @@ def _handle_open_position(
     if not p.rm.check_order(p.symbol, action.lower(), contracts):
         # V5.1: 风控拒绝透明化
         p.logger.info(
-            f"{p.tag} ❌ 拒绝开仓（风控）: {action} {contracts}张 {p.symbol} "
+            f"{p.tag} ❄1�7 拒绝弢�仓（风控＄1�7: {action} {contracts}弄1�7 {p.symbol} "
             f"| 熔断={p.rm.is_fused}, 连亏={p.rm.consecutive_losses}, "
             f"日亏={getattr(p.rm, '_daily_loss', 0):.2f}U, "
-            f"日交易次数={getattr(p.rm, '_daily_trade_count', 0)}"
+            f"日交易次敄1�7={getattr(p.rm, '_daily_trade_count', 0)}"
         )
         return None
 
@@ -1185,16 +1227,18 @@ def _handle_open_position(
         p.symbol, "market", open_side, contracts, params=open_params
     )
     if not order:
-        p.logger.error(f"{p.tag} 开仓失败")
+        p.logger.error(f"{p.tag} 弢�仓失贄1�7")
         return None
 
     fill_price = float(order.get("average") or order.get("price") or current_price)
 
-    tp1_contracts = contracts // 2 if contracts >= 2 else contracts
     sl_ord = place_algo(p.ex, p.symbol, close_side, contracts,
                         target_sl, pos_side, "sl")
-    tp_ord = place_algo(p.ex, p.symbol, close_side, tp1_contracts,
-                        target_tp, pos_side, "tp")
+    tp_ord = None
+    if target_tp > 0:
+        tp1_contracts = contracts // 2 if contracts >= 2 else contracts
+        tp_ord = place_algo(p.ex, p.symbol, close_side, tp1_contracts,
+                            target_tp, pos_side, "tp")
 
     if not sl_ord:
         # SL 挂单失败 → 紧急平仓
@@ -1210,6 +1254,7 @@ def _handle_open_position(
         "position_side":    pos_side,
         "entry_price":      fill_price,
         "active_sl":        target_sl,
+        "original_sl":      target_sl,
         "active_tp1":       target_tp,
         "active_tp2":       signal.get("tp2", 0.0),
         "margin_used":      margin_used,
@@ -1224,7 +1269,7 @@ def _handle_open_position(
     })
     save_state(p.user_id, state)
     record_trade(p.user_id, open_side, fill_price, contracts,
-                 p.symbol, "开仓", 0.0, reason)
+                 p.symbol, "弢�仄1�7", 0.0, reason)
 
     emoji = "🟢" if action == "BUY" else "🔴"
 
@@ -1240,7 +1285,7 @@ def _handle_open_position(
         _regime_labels = {"bull": "🐂 牛市", "bear": "🐻 熊市", "ranging": "📊 震荡",
                           "breakout": "🚀 突破", "wait": "⏸️ 观望"}
         _regime_str = (
-            f"\n市场状态: {_regime_labels.get(_regime_name, _regime_name)} "
+            f"\n市场状��1�7: {_regime_labels.get(_regime_name, _regime_name)} "
             f"({_regime_conf:.0%})"
         )
         _sq_str = f"\n信号质量: {_sq:.0f}/100"
@@ -1253,11 +1298,11 @@ def _handle_open_position(
         _context_str = f"\n📝 上次: {_last_close} {_pnl_tag}"
 
     p.notify(
-        f"{emoji} <b>{p.username} {'开多' if action=='BUY' else '开空'}</b>\n"
+        f"{emoji} <b>{p.username} {'弢�处1�7' if action=='BUY' else '弢�穄1�7'}</b>\n"
         f"品种: {p.symbol} | 杠杆: {p.leverage}x\n"
-        f"入场价: {fill_price:.2f} | 数量: {contracts}张\n"
+        f"入场仄1�7: {fill_price:.2f} | 数量: {contracts}张\n"
         f"止损: {target_sl:.2f} | 止盈: {target_tp:.2f}\n"
-        f"保证金: ~{margin_used:.2f} U | 风险: ~{usdt_free * p.risk_pct:.2f} U\n"
+        f"保证釄1�7: ~{margin_used:.2f} U | 风险: ~{usdt_free * p.risk_pct:.2f} U\n"
         f"策略: {p.strategy.name}\n"
         f"原因: {reason}"
         f"{_regime_str}{_sq_str}{_context_str}"
@@ -1266,7 +1311,7 @@ def _handle_open_position(
 
 
 def _apply_signal_quality_scaling(p: _RunParams, contracts: int) -> int:
-    """根据信号质量和策略胜率缩放仓位，返回 0 表示跳过开仓。"""
+    """根据信号质量和策略胜率缩放仓位，返回 0 表示跳过弢�仓��1�7"""
     if not (p.dynamic_position_enable and p.use_auto and p.selector is not None):
         return contracts
 
@@ -1275,23 +1320,23 @@ def _apply_signal_quality_scaling(p: _RunParams, contracts: int) -> int:
     if signal_quality < _LOW_SIGNAL_QUALITY_SKIP:
         # V5.1: 拒绝理由透明化 — 输出信号质量明细
         p.logger.info(
-            f"{p.tag} ❌ 拒绝开仓（信号质量不足）: "
-            f"信号分 {signal_quality:.0f} < 门槛 {_LOW_SIGNAL_QUALITY_SKIP} | "
+            f"{p.tag} ❄1�7 拒绝弢�仓（信号质量不足＄1�7: "
+            f"信号刄1�7 {signal_quality:.0f} < 门槛 {_LOW_SIGNAL_QUALITY_SKIP} | "
             f"明细: tech={quality_detail.get('tech', 0)}, "
             f"extra={quality_detail.get('extra', 0)}, "
             f"news={quality_detail.get('news', 0)}, "
             f"mtf={quality_detail.get('mtf', 0)}, "
             f"consistency={quality_detail.get('consistency', 0)}, "
             f"volatility={quality_detail.get('volatility', 0)} | "
-            f"缺失源={quality_detail.get('unknown_sources', [])}"
+            f"缺失溄1�7={quality_detail.get('unknown_sources', [])}"
         )
         return 0
     elif signal_quality < _MID_SIGNAL_QUALITY:
         sq_scale = max(_MIN_SIGNAL_QUALITY_SCALE, signal_quality / 100.0)
         contracts = max(1, int(contracts * sq_scale))
         p.logger.info(
-            f"{p.tag} 📊 信号质量={signal_quality:.0f}（中等, 门槛={_MID_SIGNAL_QUALITY}），"
-            f"仓位缩放={sq_scale:.2f} → {contracts} 张"
+            f"{p.tag} 📊 信号质量={signal_quality:.0f}（中筄1�7, 门槛={_MID_SIGNAL_QUALITY}），"
+            f"仓位缩放={sq_scale:.2f} ↄ1�7 {contracts} 弄1�7"
         )
 
     # V2.5: 策略绩效降权
@@ -1299,8 +1344,8 @@ def _apply_signal_quality_scaling(p: _RunParams, contracts: int) -> int:
     if strat_wr < _LOW_WIN_RATE_THRESHOLD:
         contracts = max(1, int(contracts * _LOW_WIN_RATE_SCALE))
         p.logger.info(
-            f"{p.tag} ⚠️ 策略 {p.strategy.name} 近期胜率低 "
-            f"({strat_wr:.0%})，降权仓位: {contracts} 张"
+            f"{p.tag} ⚠️ 策略 {p.strategy.name} 近期胜率佄1�7 "
+            f"({strat_wr:.0%})，降权仓佄1�7: {contracts} 弄1�7"
         )
     return contracts
 
@@ -1309,9 +1354,9 @@ def _emergency_rollback(
     p: _RunParams, close_side: str, pos_side: str,
     contracts: int, state: dict,
 ):
-    """SL 挂单失败后紧急平仓。"""
+    """SL 挂单失败后紧急平仓��1�7"""
     p.logger.error(f"{p.tag} 🚨 SL 挂单失败！回滚平仓！")
-    p.notify(f"🚨 <b>{p.username}</b> SL 挂单失败，已紧急平仓！")
+    p.notify(f"🚨 <b>{p.username}</b> SL 挂单失败，已紧��平仓！")
     cancel_all_algo(p.ex, p.symbol, logger=p.logger, notify=p.notify, tag=p.tag)
 
     try:
@@ -1322,17 +1367,90 @@ def _emergency_rollback(
                 **({"posSide": pos_side} if p.cached_pos_mode == "hedge" else {}),
             }
         )
-        p.logger.info(f"{p.tag} 紧急平仓已执行")
+        p.logger.info(f"{p.tag} 紧��平仓已执行")
     except Exception as rollback_err:
-        p.logger.error(f"{p.tag} 🚨🚨 紧急平仓也失败！请立即人工处理！{rollback_err}")
+        p.logger.error(f"{p.tag} 🚨🚨 紧��平仓也失败！请立即人工处理！{rollback_err}")
         p.notify(
-            f"🚨🚨 <b>{p.username} 紧急平仓失败！</b>\n"
-            f"SL 挂单失败且平仓指令也报错，请立即人工检查持仓！\n"
+            f"🚨🚨 <b>{p.username} 紧��平仓失败！</b>\n"
+            f"SL 挂单失败且平仓指令也报错，请立即人工棢�查持仓！\n"
             f"错误：{str(rollback_err)[:200]}"
         )
         state["position_side"]   = "unknown_rollback_failed"
         state["position_amount"] = contracts
         save_state(p.user_id, state)
+
+
+
+def _check_ema_exit_and_breakeven(
+    p: _RunParams, state: dict, is_long: bool, entry: float,
+    df, close_side: str, pos_side_str: str,
+) -> str:
+    """
+    V9.0: EMA trailing exit with breakeven SL move.
+    1. When price reaches +1R from entry -> move SL to breakeven
+    2. After breakeven activated -> exit when completed bar closes past EMA
+    Returns close_reason (empty string = no exit).
+    """
+    if p.exit_ema_period <= 0:
+        return ""
+
+    sl_dist = abs(entry - state.get("original_sl", state["active_sl"]))
+    if sl_dist <= 0:
+        return ""
+
+    try:
+        close_col = df['close']
+        last_close = float(close_col.iloc[-2])
+        ema = close_col.ewm(span=p.exit_ema_period, adjust=False).mean()
+        ema_val = float(ema.iloc[-2])
+    except Exception:
+        return ""
+
+    if not state.get("has_moved_to_breakeven"):
+        breakeven_trigger = (entry + sl_dist) if is_long else (entry - sl_dist)
+        reached = (last_close >= breakeven_trigger) if is_long else (last_close <= breakeven_trigger)
+
+        if reached:
+            try:
+                cancel_all_algo(p.ex, p.symbol, logger=p.logger)
+                sl_ord = place_algo(
+                    p.ex, p.symbol, close_side,
+                    state["position_amount"], entry, pos_side_str, "sl"
+                )
+                state["active_sl"] = entry
+                state["active_tp1"] = 0.0
+                state["has_moved_to_breakeven"] = True
+                state["exchange_order_ids"] = {
+                    "sl_order": sl_ord.get("id") if sl_ord else None,
+                    "tp_order": None,
+                }
+                save_state(p.user_id, state)
+                p.logger.info(
+                    f"{p.tag} V9 breakeven activated: SL -> {entry:.2f} "
+                    f"(+1R reached at {last_close:.2f})"
+                )
+                p.notify(
+                    f"\U0001f6e1 <b>{p.username} SL moved to breakeven</b>\n"
+                    f"Entry: {entry:.2f} | SL: {entry:.2f}\n"
+                    f"EMA({p.exit_ema_period}) trailing active"
+                )
+            except Exception as e:
+                p.logger.warning(f"{p.tag} breakeven move failed: {e}")
+
+    if state.get("has_moved_to_breakeven"):
+        ema_exit = False
+        if is_long and last_close < ema_val:
+            ema_exit = True
+        elif not is_long and last_close > ema_val:
+            ema_exit = True
+
+        if ema_exit:
+            return (
+                f"EMA({p.exit_ema_period}) trailing exit | "
+                f"close={last_close:.0f} vs EMA={ema_val:.0f}"
+            )
+
+    return ""
 
 
 # ── 子流程：持仓管理（TP1分批、反转、追踪止损、时间止损）──────────────────────
@@ -1342,8 +1460,8 @@ def _handle_active_position(
     current_price: float, df,
 ) -> dict | None:
     """
-    有仓位时的管理逻辑。
-    返回更新后的 state；若仅正常持仓不需要特殊处理则返回 None。
+    有仓位时的管理��辑〄1�7
+    返回更新后的 state；若仅正常持仓不霢�要特殊处理则返回 None〄1�7
     """
     if state["position_amount"] <= 0:
         return None
@@ -1377,6 +1495,12 @@ def _handle_active_position(
             p.logger, p.notify, p.tag, p.user_id,
         )
 
+    # V9.0: EMA trailing exit + breakeven
+    if p.exit_ema_period > 0 and not close_reason and state["position_amount"] > 0:
+        close_reason = _check_ema_exit_and_breakeven(
+            p, state, is_long, entry, df, close_side, pos_side_str
+        )
+
     # ── V2.5: 时间止损 ───────────────────────────────────────────────────
     if p.time_stop_enable and not close_reason and state["position_amount"] > 0:
         close_reason = _check_time_stop(state, is_long, entry, current_price, p)
@@ -1393,7 +1517,7 @@ def _check_tp1_partial(
     p: _RunParams, state: dict, is_long: bool,
     close_side: str, pos_side_str: str, entry: float,
 ) -> dict | None:
-    """检测 TP1 是否已触发（交易所实际仓位减少），执行分批止盈。"""
+    """棢�浄1�7 TP1 是否已触发（交易扢�实际仓位减少），执行分批止盈〄1�7"""
     total_amt = state["position_amount"]
     live_amt_check = live_position_amount(p.ex, p.symbol)
     tp1_amt = total_amt // 2
@@ -1426,7 +1550,7 @@ def _check_tp1_partial(
 
     p.notify(
         f"✂️ <b>{p.username} TP1已触发，分批止盈</b>\n"
-        f"剩余仓位: {live_amt_check}张 | SL已移至保本: {breakeven_sl:.2f}\n"
+        f"剩余仓位: {live_amt_check}弄1�7 | SL已移至保朄1�7: {breakeven_sl:.2f}\n"
         f"TP2目标: {tp2_price:.2f}"
     )
     return state
@@ -1436,18 +1560,18 @@ def _check_time_stop(
     state: dict, is_long: bool, entry: float,
     current_price: float, p: _RunParams,
 ) -> str:
-    """检查时间止损条件，返回平仓原因（空字符串 = 不平仓）。"""
+    """棢�查时间止损条件，返回平仓原因（空字符丄1�7 = 不平仓）〄1�7"""
     state["entry_bar_count"] = state.get("entry_bar_count", 0) + 1
     bar_count = state["entry_bar_count"]
 
     close_reason = ""
     if bar_count >= p.time_stop_bars:
         if is_long and current_price >= entry:
-            close_reason = f"时间止损: 持仓{bar_count}根K线"
+            close_reason = f"时间止损: 持仓{bar_count}根K纄1�7"
         elif not is_long and current_price <= entry:
-            close_reason = f"时间止损: 持仓{bar_count}根K线"
+            close_reason = f"时间止损: 持仓{bar_count}根K纄1�7"
         elif bar_count >= p.time_stop_bars * _TIME_STOP_FORCE_MULT:
-            close_reason = f"强制时间止损: 持仓{bar_count}根K线"
+            close_reason = f"强制时间止损: 持仓{bar_count}根K纄1�7"
 
     save_state(p.user_id, state)
     return close_reason
@@ -1458,7 +1582,7 @@ def _execute_close(
     close_side: str, pos_side_str: str,
     entry: float, current_price: float, close_reason: str,
 ) -> dict:
-    """执行主动平仓（策略反转 / 时间止损等）。"""
+    """执行主动平仓（策略反轄1�7 / 时间止损等）〄1�7"""
     cancel_all_algo(p.ex, p.symbol, logger=p.logger, notify=p.notify, tag=p.tag)
 
     close_params = {"tdMode": "cross", "reduceOnly": True}
@@ -1485,7 +1609,7 @@ def _execute_close(
                  net_pnl, close_reason,
                  # V6.0: 主动平仓 — 真实成交
                  is_estimated=False,
-                 fill_source="主动平仓（市价单真实成交）",
+                 fill_source="主动平仓（市价单真实成交＄1�7",
                  exit_reason=close_reason,
                  fee=state["open_fee"] + close_fee,
                  entry_price_override=entry)
@@ -1499,9 +1623,9 @@ def _execute_close(
 
     if p.rm.is_fused:
         p.notify(
-            f"🚨 <b>{p.username} 风控熔断！</b>\n"
-            f"连续亏损 {p.rm.consecutive_losses} 次，Bot 已暂停。\n"
-            f"恢复请在控制台点击「恢复熔断」。"
+            f"🚨 <b>{p.username} 风控熔断＄1�7</b>\n"
+            f"连续亏损 {p.rm.consecutive_losses} 次，Bot 已暂停��\n"
+            f"恢复请在控制台点击��恢复熔断����1�7"
         )
 
     clear_state(p.user_id)
@@ -1513,14 +1637,14 @@ def _execute_close(
     save_state(p.user_id, new_state)
 
     pnl_emoji = "🎉" if net_pnl > 0 else "🩸"
-    _side_label = "多" if is_long else "空"
+    _side_label = "处1�7" if is_long else "穄1�7"
     p.notify(
-        f"{pnl_emoji} <b>{p.username} 平仓（{close_reason}）</b>\n"
+        f"{pnl_emoji} <b>{p.username} 平仓（{close_reason}＄1�7</b>\n"
         f"品种: {p.symbol} | 杠杆: {p.leverage}x | 方向: {_side_label}\n"
-        f"入场价: {entry:.2f} → 出场价: {fill_price:.2f}\n"
-        f"净盈亏: <b>{net_pnl:+.2f} U</b>\n"
-        f"来源: ✅ 主动市价平仓\n"
-        f"🧊 已进入冷静期，不会立即重新开仓"
+        f"入场仄1�7: {entry:.2f} ↄ1�7 出场仄1�7: {fill_price:.2f}\n"
+        f"凢�盈亏: <b>{net_pnl:+.2f} U</b>\n"
+        f"来源: ✄1�7 主动市价平仓\n"
+        f"🧊 已进入冷静期，不会立即重新开仄1�7"
     )
     return new_state
 
@@ -1529,8 +1653,8 @@ def _execute_close(
 
 def _run_reconciliation(p: _RunParams):
     """
-    检查是否有待对账的交易记录，尝试从交易所拉取真实成交并回填。
-    成功回填后补发一条 Telegram 通知告知用户最终盈亏。
+    棢�查是否有待对账的交易记录，尝试从交易扢�拉取真实成交并回填��1�7
+    成功回填后补发一杄1�7 Telegram 通知告知用户朢�终盈亏��1�7
     """
     pending = get_pending_reconcile_trades(p.user_id, limit=5)
     if not pending:
@@ -1546,7 +1670,7 @@ def _run_reconciliation(p: _RunParams):
 
         try:
             # ── 方法一：fetch_my_trades ────────────────────────────────────
-            # V7.1: 优先用 exit_time 作为 since 起点，避免持仓时间长时50条 limit 不够
+            # ── 方法一：fetch_my_trades ────────────────────────────────────
             since_ms = None
             time_str_for_since = exit_time_str or entry_time_str
             if time_str_for_since:
@@ -1579,7 +1703,7 @@ def _run_reconciliation(p: _RunParams):
                     if price > 0:
                         real_price = price
                         exchange_trade_id = str(latest.get("id", ""))
-                        fill_source = "交易所真实成交（对账回填）"
+                        fill_source = "交易扢�真实成交（对账回填）"
 
                         info = latest.get("info", {})
                         pnl_val = info.get("pnl") or info.get("realizedPnl")
@@ -1657,20 +1781,20 @@ def _run_reconciliation(p: _RunParams):
             # ── 补发 Telegram 通知 ────────────────────────────────────────
             pnl_emoji = "🎉" if real_pnl > 0 else "🩸"
             diff = real_pnl - estimated_pnl
-            diff_str = f"（与估算差异: {diff:+.2f}U）" if abs(diff) > 0.01 else ""
+            diff_str = f"（与估算差异: {diff:+.2f}U＄1�7" if abs(diff) > 0.01 else ""
             p.notify(
                 f"📋 <b>{p.username} 对账完成</b>\n"
                 f"品种: {symbol}\n"
-                f"入场价: {entry_price:.2f} → 出场价: {real_price:.2f}\n"
+                f"入场仄1�7: {entry_price:.2f} ↄ1�7 出场仄1�7: {real_price:.2f}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ <b>最终净盈亏: {real_pnl:+.2f} U</b>\n"
-                f"原估算盈亏: ~{estimated_pnl:+.2f} U {diff_str}\n"
+                f"✄1�7 <b>朢�终净盈亏: {real_pnl:+.2f} U</b>\n"
+                f"原估算盈亄1�7: ~{estimated_pnl:+.2f} U {diff_str}\n"
                 f"来源: {fill_source}\n"
-                f"状态: ✅ 已与交易所对账"
+                f"状��1�7: ✄1�7 已与交易扢�对账"
             )
             p.logger.info(
-                f"{p.tag} ✅ 对账完成: trade#{trade_id}, "
-                f"估算={estimated_pnl:+.2f}U → 真实={real_pnl:+.2f}U"
+                f"{p.tag} ✄1�7 对账完成: trade#{trade_id}, "
+                f"估算={estimated_pnl:+.2f}U ↄ1�7 真实={real_pnl:+.2f}U"
             )
 
         except Exception as e:
@@ -1681,10 +1805,12 @@ def _run_reconciliation(p: _RunParams):
 # ── K 线拉取 & DataFrame 构建 ─────────────────────────────────────────────────
 
 def _fetch_kline_df(p: _RunParams, strategy):
-    """拉取 K 线并构建 DataFrame，返回 (df, current_price)。"""
+    """拉取 K 线并构建 DataFrame，返囄1�7 (df, current_price)〄1�7"""
+    macro_bars = getattr(p, 'macro_ema_period', 0) or 0
     kline_limit = max(
         _KLINE_MIN_LIMIT,
-        getattr(strategy, "warmup_bars", 50) * _KLINE_WARMUP_MULTIPLIER + _KLINE_WARMUP_EXTRA
+        getattr(strategy, "warmup_bars", 50) * _KLINE_WARMUP_MULTIPLIER + _KLINE_WARMUP_EXTRA,
+        macro_bars + 100,
     )
     ohlcv = fetch_ohlcv_safe(p.ex, p.symbol, p.timeframe, limit=kline_limit)
     df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -1699,8 +1825,8 @@ def _fetch_kline_df(p: _RunParams, strategy):
 def run_user_bot(bot_state, override_strategy: str = None):
     """
     :param bot_state: UserBotState 实例
-                      属性：user_id, username, risk_manager, stop_event
-    :param override_strategy: 启动时临时覆盖策略名（不保存到 DB），None 则用用户配置
+                      属��：user_id, username, risk_manager, stop_event
+    :param override_strategy: 启动时临时覆盖策略名（不保存刄1�7 DB），None 则用用户配置
     """
     p = _RunParams()
     p.user_id  = bot_state.user_id
@@ -1742,9 +1868,12 @@ def run_user_bot(bot_state, override_strategy: str = None):
         except Exception:
             pass
 
+    _runner_only_keys = {"macro_ema", "macro_long_only"}
+    _strat_params = {k: v for k, v in p.cfg["strategy_params"].items()
+                     if k not in _runner_only_keys}
     p.strategy = get_strategy(
         "PA_5S" if p.use_auto else strategy_name,
-        **({} if p.use_auto else p.cfg["strategy_params"])
+        **({} if p.use_auto else _strat_params)
     )
 
     # 同步风控参数
@@ -1760,7 +1889,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
     restore_risk_state(p.user_id, p.rm)
     p.logger.info(
-        f"{p.tag} 风控状态已恢复：连亏={p.rm._consecutive_losses}次，熔断={p.rm.is_fused}"
+        f"{p.tag} 风控状��已恢复：连亄1�7={p.rm._consecutive_losses}次，熔断={p.rm.is_fused}"
     )
 
     # ── 启动时主动查询余额作为日内基准 ────────────────────────────────────
@@ -1774,7 +1903,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
     p.notify = load_notifier(p.user_id, p.username, p.logger)
 
-    p.logger.info(f"{p.tag} Bot 启动，策略={p.cfg['strategy_name']}，品种={p.symbol}")
+    p.logger.info(f"{p.tag} Bot 启动，策畄1�7={p.cfg['strategy_name']}，品秄1�7={p.symbol}")
 
     # V2.5: 高级风控参数
     v25_cfg = global_cfg.get("risk_v25", {})
@@ -1799,21 +1928,38 @@ def run_user_bot(bot_state, override_strategy: str = None):
     p.reentry_require_stable_bars   = v25_cfg.get("reentry_require_stable_bars", 2)
     p.reentry_same_direction_block  = v25_cfg.get("reentry_same_direction_block", True)
 
+    # V9.0: EMA trailing exit
+    p.exit_ema_period = p.cfg["strategy_params"].get("exit_ema", 0)
+
+    # V10.0: Macro trend filter
+    p.macro_ema_period = p.cfg["strategy_params"].get("macro_ema", 0)
+    p.macro_long_only = p.cfg["strategy_params"].get("macro_long_only", True)
+
+    # V10.1: Daily status report
+    daily_reporter = DailyReporter(
+        user_id=p.user_id,
+        username=p.username,
+        symbol=p.symbol,
+        macro_ema_period=p.macro_ema_period if p.macro_ema_period > 0 else 1000,
+        channel_period=_strat_params.get("channel_period", 24),
+        logger=p.logger,
+    )
+
     p.notify(
-        f"🚀 <b>{p.username} 的 Bot 已启动</b>\n"
+        f"🚀 <b>{p.username} 的1�7 Bot 已启劄1�7</b>\n"
         f"策略: {p.cfg['strategy_name']} | 品种: {p.symbol} | 杠杆: {p.leverage}x"
     )
 
     # 设置杠杆
     try:
         p.ex.set_leverage(p.leverage, p.symbol, params={"mgnMode": "cross"})
-        p.logger.info(f"{p.tag} 杠杆已设为 {p.leverage}x")
+        p.logger.info(f"{p.tag} 杠杆已设丄1�7 {p.leverage}x")
     except Exception as e:
         msg = str(e)
         if 'NoneType' in msg and '+' in msg:
-            p.logger.warning(f"{p.tag} 设置杠杆遇到 OKX/ccxt 兼容异常（已跳过）: {msg}")
+            p.logger.warning(f"{p.tag} 设置杠杆遇到 OKX/ccxt 兼容异常（已跳过＄1�7: {msg}")
         else:
-            p.logger.warning(f"{p.tag} 设置杠杆失败（可能已设置）: {e}")
+            p.logger.warning(f"{p.tag} 设置杠杆失败（可能已设置＄1�7: {e}")
 
     state = load_state(p.user_id)
     p.cached_pos_mode = detect_pos_mode(p.ex)
@@ -1837,7 +1983,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
             now_ts = time.time()
             if now_ts < _rate_limit_until:
                 wait_sec = int(_rate_limit_until - now_ts)
-                p.logger.warning(f"{p.tag} 限频退避中，等待 {wait_sec}s")
+                p.logger.warning(f"{p.tag} 限频逢�避中，等径1�7 {wait_sec}s")
                 p.stop_ev.wait(min(wait_sec, p.interval))
                 continue
 
@@ -1848,9 +1994,9 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 current_bal = get_swap_usdt(p.ex)
                 p.rm.reset_daily(current_bal if current_bal > 0 else None)
                 persist_risk_state(p.user_id, p.rm)
-                p.logger.info(f"{p.tag} 跨日重置日亏状态，新日期: {today}")
+                p.logger.info(f"{p.tag} 跨日重置日亏状��，新日朄1�7: {today}")
                 p.notify(
-                    f"📅 <b>{p.username}</b> 新的一天开始，日内风控已重置。\n"
+                    f"📅 <b>{p.username}</b> 新的丢�天开始，日内风控已重置��\n"
                     f"起始余额: {current_bal:.2f} U"
                 )
 
@@ -1867,16 +2013,16 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 _zero_bal_count = 0
             else:
                 _zero_bal_count += 1
-                p.logger.warning(f"{p.tag} ⚠️ 余额获取为 0（连续第 {_zero_bal_count} 次）")
+                p.logger.warning(f"{p.tag} ⚠️ 余额获取丄1�7 0（连续第 {_zero_bal_count} 次）")
                 if _zero_bal_count == _ZERO_BALANCE_ALERT_ROUNDS:
                     alert_key = f"{p.user_id}:zero_balance"
                     if should_alert(alert_key, _ALERT_COOLDOWN_LONG_SEC):
                         p.notify(
-                            f"⚠️ <b>{p.username}</b> 连续 {_zero_bal_count} 轮余额为 0，"
-                            f"无法开仓。\n请检查：\n"
-                            f"• 模拟盘/实盘 Key 是否匹配\n"
-                            f"• 合约账户是否有 USDT\n"
-                            f"• API Key 权限是否包含「读取」"
+                            f"⚠️ <b>{p.username}</b> 连续 {_zero_bal_count} 轮余额为 0＄1�7"
+                            f"无法弢�仓��\n请检查：\n"
+                            f" 1�7 模拟盄1�7/实盘 Key 是否匹配\n"
+                            f" 1�7 合约账户是否朄1�7 USDT\n"
+                            f" 1�7 API Key 权限是否包含「读取��1�7"
                         )
 
             # ── V6.0: 延迟对账 — 重查未对账的被动平仓交易 ──────────────────
@@ -1886,7 +2032,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 try:
                     _run_reconciliation(p)
                 except Exception as e:
-                    p.logger.debug(f"{p.tag} 对账检查异常（忽略）: {e}")
+                    p.logger.debug(f"{p.tag} 对账棢�查异常（忽略＄1�7: {e}")
 
             # ── 仓位核对（检测被动平仓）────────────────────────────────────
             if state["position_amount"] > 0:
@@ -1902,7 +2048,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
                         if should_alert(alert_key, _ALERT_COOLDOWN_DEFAULT_SEC * 2):
                             p.notify(
                                 f"⚠️ <b>{p.username}</b> 持仓查询连续失败 "
-                                f"{_pos_query_fail_count} 次，请检查网络或 API 状态"
+                                f"{_pos_query_fail_count} 次，请检查网络或 API 状��1�7"
                             )
                     p.stop_ev.wait(p.interval)
                     continue
@@ -1918,6 +2064,14 @@ def run_user_bot(bot_state, override_strategy: str = None):
             # ── K 线 & 信号 ───────────────────────────────────────────────
             df, current_price = _fetch_kline_df(p, p.strategy)
 
+            # V10.1: Daily status report
+            if daily_reporter.should_send():
+                try:
+                    daily_reporter.generate_and_send(df, state, p.notify)
+                except Exception as e:
+                    p.logger.warning(f"{p.tag} Daily report failed: {e}")
+
+
             # ── V7.0: 冷静期递减 ──────────────────────────────────────────
             if state["position_amount"] == 0:
                 old_remaining = state.get("cooldown_bars_remaining", 0)
@@ -1926,11 +2080,11 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 if old_remaining > 0:
                     if new_remaining > 0:
                         p.logger.info(
-                            f"{p.tag} 🧊 冷静期: 剩余{new_remaining}根K线 "
+                            f"{p.tag} 🧊 冷静朄1�7: 剩余{new_remaining}根K纄1�7 "
                             f"(上次平仓: {state.get('last_close_reason', '')})"
                         )
                     else:
-                        p.logger.info(f"{p.tag} ✅ 冷静期结束，恢复正常交易评估")
+                        p.logger.info(f"{p.tag} ✄1�7 冷静期结束，恢复正常交易评估")
                     save_state(p.user_id, state)
 
             # ── AUTO 模式：每轮评估市场状态 ───────────────────────────────
@@ -1948,26 +2102,26 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 state = _handle_regime_transition(p, state, regime_result, current_price)
 
                 # V5.2: WAIT 不再硬跳过开仓
-                # 如果信号质量 >= 15 且策略给出了信号，允许降仓尝试开仓
-                # 只有信号质量极低（< 15）时才真正跳过
+                # V5.2: WAIT 不再硬跳过开仓
+                # V5.2: WAIT 不再硬跳过开仓
                 if regime_result.get("regime") == "wait" and state["position_amount"] == 0:
                     sq = regime_result.get("signal_quality", 0)
                     if sq < _LOW_SIGNAL_QUALITY_SKIP:
                         p.logger.info(
-                            f"{p.tag} 📋 WAIT 观望（质量={sq:.0f} < {_LOW_SIGNAL_QUALITY_SKIP}），"
-                            f"跳过开仓 ({regime_result['reason']})"
+                            f"{p.tag} 📋 WAIT 观望（质釄1�7={sq:.0f} < {_LOW_SIGNAL_QUALITY_SKIP}），"
+                            f"跳过弢�仄1�7 ({regime_result['reason']})"
                         )
                         p.stop_ev.wait(p.interval)
                         continue
                     else:
                         p.logger.info(
-                            f"{p.tag} 📋 WAIT 但信号质量={sq:.0f}≥{_LOW_SIGNAL_QUALITY_SKIP}，"
+                            f"{p.tag} 📋 WAIT 但信号质釄1�7={sq:.0f}≥{_LOW_SIGNAL_QUALITY_SKIP}＄1�7"
                             f"允许降仓尝试 ({regime_result['reason']})"
                         )
 
                 # V4.0: 日内交易次数检查
                 if p.rm.daily_trades_exhausted and state["position_amount"] == 0:
-                    p.logger.info(f"{p.tag} 📋 日内交易次数已达上限，跳过开仓")
+                    p.logger.info(f"{p.tag} 📋 日内交易次数已达上限，跳过开仄1�7")
                     p.stop_ev.wait(p.interval)
                     continue
 
@@ -1976,17 +2130,17 @@ def run_user_bot(bot_state, override_strategy: str = None):
                     p.strategy = new_strategy
                     df, current_price = _fetch_kline_df(p, p.strategy)
                     p.logger.info(
-                        f"{p.tag} 策略热切换: {old_name} → {p.strategy.name} "
+                        f"{p.tag} 策略热切捄1�7: {old_name} ↄ1�7 {p.strategy.name} "
                         f"({regime_result['reason']})"
                     )
                     if state["position_amount"] == 0:
                         p.notify(
-                            f"🔄 <b>{p.username} 策略已切换</b>\n"
-                            f"新策略: <b>{p.strategy.name}</b>\n"
-                            f"市场状态: {regime_result['regime'].upper()}\n"
-                            f"技术面: {regime_result['tech_regime']} | "
-                            f"新闻面: {regime_result['news_regime']}\n"
-                            f"置信度: {regime_result['confidence']:.0%}\n"
+                            f"🔄 <b>{p.username} 策略已切捄1�7</b>\n"
+                            f"新策畄1�7: <b>{p.strategy.name}</b>\n"
+                            f"市场状��1�7: {regime_result['regime'].upper()}\n"
+                            f"抢�术面: {regime_result['tech_regime']} | "
+                            f"新闻靄1�7: {regime_result['news_regime']}\n"
+                            f"置信庄1�7: {regime_result['confidence']:.0%}\n"
                             f"信号质量: {regime_result.get('signal_quality', 0):.0f}/100"
                         )
 
@@ -1994,7 +2148,7 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
             p.logger.info(
                 f"{p.tag} 信号={signal['action']} 价格={current_price:.2f} "
-                f"仓位={state['position_side'] or '空仓'}/{state['position_amount']}张"
+                f"仓位={state['position_side'] or '空仓'}/{state['position_amount']}弄1�7"
             )
 
             # ══════════════ 空仓 → 开仓 ══════════════════════════════════
@@ -2018,38 +2172,38 @@ def run_user_bot(bot_state, override_strategy: str = None):
                 _RATE_LIMIT_MIN_WAIT_SEC * (2 ** getattr(e, 'retry_after', 1))
             )
             _rate_limit_until = time.time() + wait_sec
-            p.logger.warning(f"{p.tag} API 限频，退避 {wait_sec}s")
+            p.logger.warning(f"{p.tag} API 限频，���遄1�7 {wait_sec}s")
             alert_key = f"{p.user_id}:rate_limit"
             if should_alert(alert_key, _ALERT_COOLDOWN_DEFAULT_SEC * 2):
-                p.notify(f"⏱️ <b>{p.username}</b> API 限频，已自动退避 {wait_sec}s")
+                p.notify(f"⏱️ <b>{p.username}</b> API 限频，已自动逢�遄1�7 {wait_sec}s")
             p.stop_ev.wait(min(wait_sec, p.interval))
             continue
 
         except ccxt.AuthenticationError as e:
             p.logger.error(f"{p.tag} 🚨 API Key 认证失败，Bot 停止: {e}")
             p.notify(
-                f"🚨 <b>{p.username} API Key 认证失败，Bot 已停止</b>\n"
+                f"🚨 <b>{p.username} API Key 认证失败，Bot 已停歄1�7</b>\n"
                 f"请检查：\n"
-                f"• <b>模拟盘/实盘是否一致</b>：在 OKX 模拟盘创建的 Key 需勾选「使用模拟盘」，实盘 Key 勿勾选。\n"
-                f"• <b>IP 白名单</b>：若 OKX 绑定了 IP，请将本服务器 IP 加入白名单。\n"
-                f"在设置页重新配置后，可先点「验证 API Key」再启动 Bot。"
+                f" 1�7 <b>模拟盄1�7/实盘是否丢�臄1�7</b>：在 OKX 模拟盘创建的 Key 霢�勾����使用模拟盘」，实盘 Key 勿勾选��\n"
+                f" 1�7 <b>IP 白名卄1�7</b>：若 OKX 绑定亄1�7 IP，请将本服务噄1�7 IP 加入白名单��\n"
+                f"在设置页重新配置后，可先点��验评1�7 API Key」再启动 Bot〄1�7"
             )
             p.stop_ev.set()
             return
 
         except ccxt.ExchangeNotAvailable as e:
-            p.logger.warning(f"{p.tag} 交易所维护中，等待 {_MAINTENANCE_WAIT_SEC}s: {e}")
+            p.logger.warning(f"{p.tag} 交易扢�维护中，等待 {_MAINTENANCE_WAIT_SEC}s: {e}")
             alert_key = f"{p.user_id}:maintenance"
             if should_alert(alert_key, _MAINTENANCE_ALERT_COOLDOWN_SEC):
-                p.notify(f"🔧 <b>{p.username}</b> 交易所维护中，Bot 暂停，将自动恢复")
+                p.notify(f"🔧 <b>{p.username}</b> 交易扢�维护中，Bot 暂停，将自动恢复")
             p.stop_ev.wait(_MAINTENANCE_WAIT_SEC)
             continue
 
         except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
-            p.logger.warning(f"{p.tag} 网络异常，等待重试: {e}")
+            p.logger.warning(f"{p.tag} 网络异常，等待重评1�7: {e}")
             alert_key = f"{p.user_id}:network_error"
             if should_alert(alert_key, _ALERT_COOLDOWN_DEFAULT_SEC):
-                p.notify(f"📡 <b>{p.username}</b> 网络异常，Bot 将自动重试")
+                p.notify(f"📡 <b>{p.username}</b> 网络异常，Bot 将自动重评1�7")
             p.stop_ev.wait(_NETWORK_ERROR_WAIT_SEC)
             continue
 
@@ -2070,8 +2224,8 @@ def run_user_bot(bot_state, override_strategy: str = None):
 
         p.stop_ev.wait(p.interval)
 
-    p.logger.info(f"{p.tag} Bot 已停止")
-    p.notify(f"🛑 <b>{p.username} 的 Bot 已停止</b>")
+    p.logger.info(f"{p.tag} Bot 已停歄1�7")
+    p.notify(f"🛑 <b>{p.username} 的1�7 Bot 已停歄1�7</b>")
     try:
         from core.user_bot import manager as _mgr
         _mgr.unregister_user_selector(p.user_id)

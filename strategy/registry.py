@@ -12,8 +12,10 @@ from strategy.trend_bull import TrendBullStrategy
 from strategy.trend_bear import TrendBearStrategy
 from strategy.range_oscillator import RangeOscillatorStrategy
 from strategy.big_candle import BigCandleStrategy
+from strategy.trend_momentum import TrendMomentumStrategy
 
 _REGISTRY: dict[str, type[BaseStrategy]] = {
+    "TM":         TrendMomentumStrategy,
     "PA_5S":      PriceActionSetups,
     "ADAPTIVE":   AdaptiveStrategy,
     "BULL":       TrendBullStrategy,
@@ -40,7 +42,7 @@ def list_strategies() -> list[dict]:
         {
             "name":   "AUTO",
             "class":  "MarketRegimeSelector",
-            "params": [],   # AUTO 模式无可调参数，由 selector 自动管理
+            "params": [],
         }
     ]
     result.extend(

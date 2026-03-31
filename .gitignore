@@ -67,3 +67,19 @@ htmlcov/
 
 # ── CodeBuddy 项目数据 ───────────────────────────────────────────────────
 .codebuddy/
+
+# -- SQLite WAL --
+*.db-shm
+*.db-wal
+*.db.*.bak
+
+# -- env backups --
+.env.backup.*
+
+
+# SQLite WAL
+*.db-shm
+*.db-wal
+*.db.*.bak
+# env backups
+.env.backup.*

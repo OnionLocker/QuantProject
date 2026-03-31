@@ -1,12 +1,12 @@
 """
 risk/risk_manager.py - 机构级风控管理器 V4.0
 
-V4.0 升级：
-  - Equity Curve Trading: 策略资金曲线跌破 EMA 时自动降仓
-  - 回撤保护: 实时监控回撤，分级触发（警告/减仓/熔断）
-  - Regime 感知: 高风险 regime 自动降仓（如刚从 BULL 切到 BEAR）
-  - 动态风险预算: 根据连续盈亏动态调整 risk_pct
-  - 每日最大交易次数限制
+V4.0 升级＄1�71ￄ1�77
+  - Equity Curve Trading: 策略资金曲线跌破 EMA 时自动降仄1�71ￄ1�77
+  - 回撤保护: 实时监控回撤，分级触发（警告/减仓/熔断＄1�71ￄ1�77
+  - Regime 感知: 高风附1�71ￄ1�77 regime 自动降仓（如刚从 BULL 切到 BEAR＄1�71ￄ1�77
+  - 动��风险预箄1�71ￄ1�77: 根据连续盈亏动��调敄1�71ￄ1�77 risk_pct
+  - 每日朢�大交易次数限刄1�71ￄ1�77
   - 持仓时间超限保护
 """
 import math
@@ -76,7 +76,7 @@ class RiskManager:
     # ── V4.0: 回撤保护 ────────────────────────────────────────────────────
 
     def update_drawdown(self, current_balance: float):
-        """每次余额变化时调用，检测回撤等级。"""
+        """每次余额变化时调用，棢�测回撤等级�ￄ1�71ￄ1�77"""
         if current_balance <= 0:
             return
 
@@ -95,28 +95,28 @@ class RiskManager:
             if old_level != "halted":
                 self.is_trading_allowed = False
                 logger.warning(
-                    f"🚨 [回撤熔断] 回撤 {drawdown*100:.1f}% ≥ {self._drawdown_halt_pct*100:.0f}%，"
-                    f"已暂停交易！峰值={self._peak_balance:.2f}, 当前={current_balance:.2f}"
+                    f"🚨 [回撤熔断] 回撤 {drawdown*100:.1f}% ≄1�71ￄ1�77 {self._drawdown_halt_pct*100:.0f}%＄1�71ￄ1�77"
+                    f"已暂停交易！峰�ￄ1�71ￄ1�77={self._peak_balance:.2f}, 当前={current_balance:.2f}"
                 )
         elif drawdown >= self._drawdown_reduce_pct:
             self._drawdown_level = "reduced"
             if old_level not in ("reduced", "halted"):
                 logger.warning(
-                    f"⚠️ [回撤减仓] 回撤 {drawdown*100:.1f}% ≥ {self._drawdown_reduce_pct*100:.0f}%，"
-                    f"自动降低仓位至 50%"
+                    f"⚠️ [回撤减仓] 回撤 {drawdown*100:.1f}% ≄1�71ￄ1�77 {self._drawdown_reduce_pct*100:.0f}%＄1�71ￄ1�77"
+                    f"自动降低仓位臄1�71ￄ1�77 50%"
                 )
         elif drawdown >= self._drawdown_warning_pct:
             self._drawdown_level = "warning"
             if old_level == "normal":
                 logger.info(
-                    f"⚡ [回撤警告] 回撤 {drawdown*100:.1f}% ≥ {self._drawdown_warning_pct*100:.0f}%"
+                    f"⚄1�71ￄ1�77 [回撤警告] 回撤 {drawdown*100:.1f}% ≄1�71ￄ1�77 {self._drawdown_warning_pct*100:.0f}%"
                 )
         else:
             self._drawdown_level = "normal"
 
     @property
     def drawdown_scale(self) -> float:
-        """返回回撤对应的仓位缩放系数 [0, 1]。"""
+        """返回回撤对应的仓位缩放系敄1�71ￄ1�77 [0, 1]〄1�71ￄ1�77"""
         if self._drawdown_level == "halted":
             return 0.0
         elif self._drawdown_level == "reduced":
@@ -128,7 +128,7 @@ class RiskManager:
     # ── V4.0: Equity Curve Trading ────────────────────────────────────────
 
     def update_equity_curve(self, balance: float):
-        """每次平仓后更新资金曲线 EMA。"""
+        """每次平仓后更新资金曲纄1�71ￄ1�77 EMA〄1�71ￄ1�77"""
         self._equity_history.append(balance)
         if len(self._equity_history) < 3:
             self._equity_ema = balance
@@ -144,12 +144,12 @@ class RiskManager:
         self._equity_below_ema = balance < self._equity_ema
         if self._equity_below_ema:
             logger.info(
-                f"📉 [Equity Curve] 余额 {balance:.2f} < EMA {self._equity_ema:.2f}，策略降权"
+                f"📉 [Equity Curve] 余额 {balance:.2f} < EMA {self._equity_ema:.2f}，策略降杄1�71ￄ1�77"
             )
 
     @property
     def equity_curve_scale(self) -> float:
-        """Equity Curve Trading 仓位缩放系数。"""
+        """Equity Curve Trading 仓位缩放系数〄1�71ￄ1�77"""
         if self._equity_below_ema and len(self._equity_history) >= self.DEFAULT_EQUITY_MIN_SAMPLES:
             return self.EQUITY_BELOW_EMA_SCALE
         return 1.0
@@ -159,8 +159,8 @@ class RiskManager:
     def set_regime_context(self, regime: str, confidence: float = 1.0,
                            transition_action: str = None):
         """
-        由 runner.py 在每轮循环中调用，更新 regime 上下文。
-        高风险场景（如 BULL→BEAR 刚切换）自动降仓。
+        甄1�71ￄ1�77 runner.py 在每轮循环中调用，更斄1�71ￄ1�77 regime 上下文�ￄ1�71ￄ1�77
+        高风险场景（妄1�71ￄ1�77 BULL→BEAR 刚切换）自动降仓〄1�71ￄ1�77
         """
         self._regime_name = regime
 
@@ -169,7 +169,7 @@ class RiskManager:
             self._regime_risk_mult = 0.5
         elif regime == "wait":
             # V5.2: WAIT 不再完全封死（0.0），改为半仓试探
-            # 让策略有机会在 WAIT 期间低仓位尝试
+            # V5.2: WAIT 不再完全封死（0.0），改为半仓试探
             self._regime_risk_mult = 0.4
         elif confidence < 0.4:
             self._regime_risk_mult = 0.6
@@ -186,9 +186,9 @@ class RiskManager:
 
     def _update_dynamic_risk(self):
         """
-        根据近期盈亏动态调整 risk_pct。
-        连续盈利 → 适度加仓（Kelly 精神）
-        连续亏损 → 大幅降仓（保护本金优先）
+        根据近期盈亏动��调敄1�71ￄ1�77 risk_pct〄1�71ￄ1�77
+        连续盈利 ↄ1�71ￄ1�77 适度加仓（Kelly 精神＄1�71ￄ1�77
+        连续亏损 ↄ1�71ￄ1�77 大幅降仓（保护本金优先）
         """
         if len(self._recent_pnls) < self.KELLY_MIN_SAMPLES:
             self._dynamic_risk_pct = self._base_risk_pct
@@ -199,7 +199,7 @@ class RiskManager:
         win_rate = wins / len(pnls)
 
         # 简化 Kelly: risk_mult = max(0.5, min(1.5, 2*WR))
-        # WR=0.3 → 0.6x, WR=0.5 → 1.0x, WR=0.7 → 1.4x
+        # 简化 Kelly: risk_mult = max(0.5, min(1.5, 2*WR))
         kelly_mult = max(self.KELLY_MIN_MULT, min(self.KELLY_MAX_MULT, win_rate * 2.0))
 
         # 连续亏损额外惩罚
@@ -213,7 +213,7 @@ class RiskManager:
         self._dynamic_risk_pct = self._base_risk_pct * kelly_mult
 
     def get_effective_risk_pct(self, base_risk_pct: float = None) -> float:
-        """返回综合所有因素后的有效风险比例。"""
+        """返回综合扢�有因素后的有效风险比例�ￄ1�71ￄ1�77"""
         if base_risk_pct:
             self._base_risk_pct = base_risk_pct
         self._update_dynamic_risk()
@@ -227,7 +227,7 @@ class RiskManager:
     # ── 原有方法保持兼容 ─────────────────────────────────────────────────────
 
     def notify_trade_result(self, pnl: float, current_balance: float):
-        """每次平仓后调用，传入净盈亏和当前余额。"""
+        """每次平仓后调用，传入凢�盈亏和当前余额�ￄ1�71ￄ1�77"""
         if self._daily_start_balance is None:
             self._daily_start_balance = (
                 current_balance + abs(pnl) if pnl < 0 else current_balance
@@ -257,7 +257,7 @@ class RiskManager:
                 self.is_trading_allowed   = False
                 self._daily_loss_triggered = True
                 logger.warning(
-                    "🚨 [风控熔断] 当日亏损达 %.1f%%，超过上限 %.1f%%，已自动停止交易！",
+                    "🚨 [风控熔断] 当日亏损辄1�71ￄ1�77 %.1f%%，超过上附1�71ￄ1�77 %.1f%%，已自动停止交易＄1�71ￄ1�77",
                     daily_loss * 100,
                     self.daily_loss_limit_pct * 100,
                 )
@@ -267,39 +267,54 @@ class RiskManager:
         self.update_equity_curve(current_balance)
 
     def reset_daily(self, new_balance: float = None):
-        """每日开始时调用，重置日内状态（连亏不重置，跨日继续累计）。"""
+        """
+        每日弢�始时调用，重置日内状态�ￄ1�71ￄ1�77
+        V8.0: 跨日自动恢复连亏熔断（日亄1�71ￄ1�77/回撤熔断除外）�ￄ1�71ￄ1�77
+        真金白银逻辑：隔夜市场环境已变，连亏的原因可能已不存在，
+        不应讄1�71ￄ1�77 Bot 无限期停工��连亏计数衰减为丢�半（而非清零），
+        保留丢�定惩罚但允许恢复交易〄1�71ￄ1�77
+        """
         self._daily_start_balance  = new_balance
         self._daily_loss_triggered = False
-        self._daily_trade_count    = 0  # V4.0: 重置日内交易次数
+        self._daily_trade_count    = 0
 
-        # V4.0: 更新峰值余额
         if new_balance and new_balance > self._peak_balance:
             self._peak_balance = new_balance
 
+        if not self.is_trading_allowed and self._drawdown_level != "halted":
+            old_losses = self._consecutive_losses
+            self._consecutive_losses = max(0, self._consecutive_losses - 2)
+            if self._consecutive_losses < self.max_consecutive_losses:
+                self.is_trading_allowed = True
+                logger.info(
+                    "🔄 [风控] 跨日自动恢复: 连亏 %dↄ1�71ￄ1�77%d (低于阈�ￄ1�71ￄ1�77 %d)，已恢复交易",
+                    old_losses, self._consecutive_losses, self.max_consecutive_losses,
+                )
+
         if new_balance:
-            logger.info("📅 [风控] 日内状态已重置，起始余额: %.2f U", new_balance)
+            logger.info("📅 [风控] 日内状��已重置，起始余预1�71ￄ1�77: %.2f U", new_balance)
         else:
-            logger.info("📅 [风控] 日内状态已重置（余额待确认）")
+            logger.info("📅 [风控] 日内状��已重置（余额待确认＄1�71ￄ1�77")
 
     def set_daily_start_balance(self, balance: float):
         """
         弱点修复：Bot 启动时主动设置当日起始余额，
-        而不是等第一笔亏损才初始化，避免基准偏低。
+        而不是等第一笔亏损才初始化，避免基准偏低〄1�71ￄ1�77
         """
         if self._daily_start_balance is None:
             self._daily_start_balance = balance
-            logger.info("📅 [风控] 当日起始余额已初始化：%.2f U", balance)
+            logger.info("📅 [风控] 当日起始余额已初始化＄1�71ￄ1�77%.2f U", balance)
         # V4.0: 初始化峰值
         if balance > self._peak_balance:
             self._peak_balance = balance
 
     def manual_resume(self):
-        """人工确认后恢复交易（熔断后手动调用）。"""
+        """人工确认后恢复交易（熔断后手动调用）〄1�71ￄ1�77"""
         self.is_trading_allowed    = True
         self._consecutive_losses   = 0
         self._daily_loss_triggered = False
         self._drawdown_level       = "normal"  # V4.0: 重置回撤等级
-        logger.info("✅ [风控] 已手动恢复交易。")
+        logger.info("✄1�71ￄ1�77 [风控] 已手动恢复交易�ￄ1�71ￄ1�77")
 
     @property
     def consecutive_losses(self) -> int:
@@ -317,28 +332,28 @@ class RiskManager:
     def check_order(self, symbol: str, side: str, amount: int,
                     notional_usdt: float = None) -> bool:
         """
-        风控前置检查。V4.0 新增：回撤检查 + 日内交易次数检查。
+        风控前置棢�查��V4.0 新增：回撤检柄1�71ￄ1�77 + 日内交易次数棢�查�ￄ1�71ￄ1�77
         """
         if not self.is_trading_allowed:
-            logger.warning("❌ 风控拦截：系统当前禁止交易（连亏熔断或日亏熔断）。")
+            logger.warning("❄1�71ￄ1�77 风控拦截：系统当前禁止交易（连亏熔断或日亏熔断）〄1�71ￄ1�77")
             return False
         if self._drawdown_level == "halted":
-            logger.warning("❌ 风控拦截：回撤超限，已暂停交易。")
+            logger.warning("❄1�71ￄ1�77 风控拦截：回撤超限，已暂停交易�ￄ1�71ￄ1�77")
             return False
         if self.daily_trades_exhausted:
             logger.warning(
-                f"❌ 风控拦截：日内已交易 {self._daily_trade_count} 次，"
-                f"达上限 {self._max_daily_trades} 次。"
+                f"❄1�71ￄ1�77 风控拦截：日内已交易 {self._daily_trade_count} 次，"
+                f"达上附1�71ￄ1�77 {self._max_daily_trades} 次�ￄ1�71ￄ1�77"
             )
             return False
         if notional_usdt is not None and notional_usdt > self.max_trade_amount:
             logger.warning(
-                "❌ 风控拦截：单笔金额 (%.2f USDT) 超过硬性上限 (%d USDT)。",
+                "❄1�71ￄ1�77 风控拦截：单笔金预1�71ￄ1�77 (%.2f USDT) 超过硬��上附1�71ￄ1�77 (%d USDT)〄1�71ￄ1�77",
                 notional_usdt, self.max_trade_amount,
             )
             return False
         if amount <= 0:
-            logger.warning("❌ 风控拦截：下单数量不能 ≤ 0。")
+            logger.warning("❄1�71ￄ1�77 风控拦截：下单数量不胄1�71ￄ1�77 ≄1�71ￄ1�77 0〄1�71ￄ1�77")
             return False
         return True
 
@@ -346,7 +361,7 @@ class RiskManager:
         self, balance: float, entry_price: float, sl_price: float,
         risk_pct: float, contract_size: float, fee_rate: float, leverage: float
     ) -> int:
-        """固定风险头寸计算 (Fixed Fractional Sizing)，V4.0 集成动态风险因子。"""
+        """固定风险头寸计算 (Fixed Fractional Sizing)，V4.0 集成动��风险因子�ￄ1�71ￄ1�77"""
         if entry_price <= 0 or sl_price <= 0 or balance <= 0 or entry_price == sl_price:
             return 0
 
@@ -386,7 +401,7 @@ class RiskManager:
     # ── V4.0: 风控状态摘要（供前端展示）─────────────────────────────────────
 
     def get_status_summary(self) -> dict:
-        """返回风控状态摘要，供 API/前端展示。"""
+        """返回风控状��摘要，侄1�71ￄ1�77 API/前端展示〄1�71ￄ1�77"""
         return {
             "is_trading_allowed": self.is_trading_allowed,
             "consecutive_losses": self._consecutive_losses,

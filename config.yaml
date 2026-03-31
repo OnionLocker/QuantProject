@@ -7,40 +7,51 @@ bot:
   leverage: 3
   contract_size: 0.01
   taker_fee_rate: 0.0005
-  check_interval: 300          # 每轮扫描间隔（秒）
+  check_interval: 300          # 每轮扫描间隔(秒)
 
 risk:
   risk_per_trade_pct: 0.01     # 单笔最大亏损占本金比例
-  max_trade_amount: 1000       # 单笔最大金额上限（USDT）
-  max_consecutive_losses: 3    # 连续亏损 N 次触发熔断
+  max_trade_amount: 1000       # 单笔最大金额上限(USDT)
+  max_consecutive_losses: 5    # V8.0: 3->5, 连续亏损4-5笔属正常波动范围
   daily_loss_limit_pct: 0.05   # 单日亏损超过此比例触发熔断
 
 strategy:
-  name: "AUTO"                 # AUTO = 启用自动选择器；或直接填策略名固定使用
-  params: {}
+  name: "TM"                   # TM = TrendMomentum; AUTO = 启用自动选择器
+  params:
+    channel_period: 24         # Donchian 通道回看, 24根(1h = 1天)
+    fast_ema:       20         # 快速EMA, 与慢EMA形成交叉
+    trend_ema:      120        # 慢速EMA过滤趋势方向
+    atr_sl_mult:    3.0        # 宽止损 ATR x 3.0
+    rr_min:         3.5        # 止盈 = 止损 x 3.5 (R:R = 3.5:1)
+    cooldown:       16         # 信号冷却期16根(即16h)
+    max_atr_mult:   1.3        # ATR不超过均值的1.3(过滤高波动假突破)
+    breakout_margin: 0.0       # 突破余量(0=碰到即触发)
+    exit_ema:       100        # V9.0: EMA trailing exit (0=off, 100=EMA100)
+    macro_ema:      1000       # V10.0: Macro trend EMA period on 1h (0=off, 1000=~42 days)
+    macro_long_only: true      # V10.0: true=only long when price>EMA, false=allow short below
 
-# ── 自动策略选择器配置（strategy.name = "AUTO" 时生效）────────────────────────
+# -- 自动策略选择器配置 (strategy.name = "AUTO" 时生效) --
 selector:
   # 技术面参数 (V5.0: BTC适配 - 降低趋势门槛)
   adx_period:       14
-  adx_bull_thresh:  18         # V5.0: 从20降到18，BTC ADX普遍偏低，18即有趋势迹象
-  adx_range_thresh: 13         # V5.0: 从16降到13，更少行情被判为震荡
-  ema_short:        10         # V5.0: 从12降到10，更灵敏
-  ema_mid:          30         # V5.0: 从36降到30，提升反应速度
-  ema_long:         80         # V5.2: 从120降到80（3.3天趋势线），更适合BTC 1h节奏
+  adx_bull_thresh:  18         # V5.0: 从20降到18, BTC ADX普遍偏低, 18即有趋势迹象
+  adx_range_thresh: 13         # V5.0: 从16降到13, 更少行情被判为震荡
+  ema_short:        10         # V5.0: 从12降到10, 更灵敏
+  ema_mid:          30         # V5.0: 从36降到30, 提升反应速度
+  ema_long:         80         # V5.2: 从120降到80(3.3天趋势线), 更适合BTC 1h节奏
   bb_period:        20
-  bb_squeeze_pct:   0.03       # V5.2: 从0.04降到0.03，减少误判挤压的概率
+  bb_squeeze_pct:   0.03       # V5.2: 从0.04降到0.03, 减少误判挤压的概率
 
   # 权重配置 (V5.0: 技术面权重最大化)
   tech_weight:      1.0
-  news_weight:      0.05       # V5.0: 从0.08降到0.05，减少噪声干扰
+  news_weight:      0.05       # V5.0: 从0.08降到0.05, 减少噪声干扰
   news_max_age_min: 120
 
   # 防抖 (V5.0: 进一步加速确认)
   confirm_bars:     2
   confirm_bars_fast:    1       # 高置信度直接确认
-  confirm_bars_slow:    2       # V5.0: 从3降到2，低置信度也快速响应
-  confirm_fast_thresh:  0.55    # V5.0: 从0.65降到0.55，更容易快速确认
+  confirm_bars_slow:    2       # V5.0: 从3降到2, 低置信度也快速响应
+  confirm_fast_thresh:  0.55    # V5.0: 从0.65降到0.55, 更容易快速确认
   confirm_slow_thresh:  0.30    # V5.0: 从0.35降到0.30
 
   # 各 regime 对应的策略名
@@ -59,13 +70,13 @@ selector:
 
   # V3.0: 资金费率否决权 (V5.0: 收紧否决触发)
   funding_veto_enable: true
-  funding_veto_mult:   3.0     # V5.0: 从2.5提高到3.0，更极端才否决
+  funding_veto_mult:   3.0     # V5.0: 从2.5提高到3.0, 更极端才否决
   funding_veto_contra: true
 
   # V4.0: 多时间框架确认 (V5.0: 降低MTF压制)
   mtf_enable:        true
   mtf_ema_period:    30        # V5.0: 从34降到30
-  mtf_weight:        0.12      # V5.2: 从0.06提到0.12，MTF有方向时应该有更大话语权
+  mtf_weight:        0.12      # V5.2: 从0.06提到0.12, MTF有方向时有更大话语权
 
   # V4.0: VWAP 偏离度 (V5.0: 放宽均值回归压力)
   vwap_period:       20
@@ -73,10 +84,10 @@ selector:
 
   # V4.0: 动态否决权阈值
   dynamic_veto_enable:  true
-  dynamic_veto_pctile:  95     # V5.0: 从92提高到95，更少触发否决
+  dynamic_veto_pctile:  95     # V5.0: 从92提高到95, 更少触发否决
 
   # V4.0: 信号质量评分阈值 (V5.0: 大幅降低门槛)
-  signal_quality_full:  30     # V5.2: 从40降到30，匹配新评分逻辑
+  signal_quality_full:  30     # V5.2: 从40降到30, 匹配新评分逻辑
   signal_quality_half:  15     # V5.2: 从20降到15
 
   # 各策略的参数覆盖 (V5.0: BTC 1h 盈利导向优化)
@@ -86,18 +97,18 @@ selector:
       ema_slow:      21
       ema_trend:     30         # V5.0: 从34降到30
       adx_threshold: 18         # V5.0: 从20降到18
-      atr_sl_mult:   1.5        # V5.1: 从1.0提到1.5，BTC 1H插针容错（机构博弈环境）
-      rr1:           1.5        # V5.0: 从1.4提到1.5，风险收益比更优
-      rsi_os:        45         # V5.0: 从42放宽到45，更容易触发B2回调买点
+      atr_sl_mult:   1.5        # V5.1: 从1.0提到1.5, BTC 1H插针容错(机构博弈环境)
+      rr1:           1.5        # V5.0: 从1.4提到1.5, 风险收益比更优
+      rsi_os:        45         # V5.0: 从42放宽到45, 更容易触发B2回调买点
       cooldown:      2          # V5.0: 从3降到2
     BEAR:
       ema_fast:      8
       ema_slow:      21
       ema_trend:     30
       adx_threshold: 18
-      atr_sl_mult:   1.5        # V5.1: 统一1.5，BTC 1H插针容错
+      atr_sl_mult:   1.5        # V5.1: 统一1.5, BTC 1H插针容错
       rr1:           1.5
-      rsi_ob:        55         # V5.0: 从58降到55，更容易触发S2反弹空点
+      rsi_ob:        55         # V5.0: 从58降到55, 更容易触发S2反弹空点
       cooldown:      2
     RANGE:
       bb_period:     20
@@ -108,16 +119,16 @@ selector:
       adx_rise_thresh:  1.0     # V5.0: 从1.5降到1.0
       vol_mult:      1.05       # V5.0: 从1.15降到1.05
       body_ratio_min: 45.0      # V5.0: 从50降到45
-      atr_sl_mult:   1.5        # V5.1: 从0.8提到1.5，统一BTC 1H插针容错
+      atr_sl_mult:   1.5        # V5.1: 从0.8提到1.5, 统一BTC 1H插针容错
       rr1:           1.5
       rr2:           2.8
-      cooldown:      3          # V5.0: 从4降到3
+      cooldown:      2          # V8.0: 3->2, 震荡策略可更快再开仓
     BIG_CANDLE:
       body_pct:      0.8        # V5.0: 从0.9降到0.8
       vol_mult:      1.1        # V5.0: 从1.15降到1.1
       body_ratio_min: 45.0      # V5.0: 从50降到45
       sl_mode:       1
-      atr_sl_mult:   1.5        # V5.1: 从1.0提到1.5，统一BTC 1H插针容错
+      atr_sl_mult:   1.5        # V5.1: 从1.0提到1.5, 统一BTC 1H插针容错
       rr1:           1.5        # V5.0: 从1.4提到1.5
       breakout_lookback: 10     # V5.0: 从12降到10
       high_pos_lookback: 36
@@ -130,76 +141,75 @@ api:
   port: 8080
   enable: true
   # CORS 允许的源列表
-  # ⚠️ 生产环境务必替换为实际域名！["*"] 仅用于开发调试
+  # 生产环境务必替换为实际域名! ["*"] 仅用于开发调试
   # 例如: ["https://your-domain.com", "https://admin.your-domain.com"]
   cors_origins: ["*"]
-  # 速率限制（每 IP 每分钟请求数）
+  # 速率限制(每 IP 每分钟请求数)
   rate_limit:
     general_rpm: 120                   # 普通 API 端点
-    auth_rpm: 10                       # 登录/注册端点（防暴力破解）
+    auth_rpm: 10                       # 登录/注册端点(防暴力破解)
 
-# ── OpenClaw 新闻同步（外部新闻面输入）──────────────────────────────────────
-# 当 strategy.selector.news_weight > 0 时建议启用。
-# OpenClaw 按固定频率抓新闻、分析后写回 QuantBot，selector 直接读 news_summary。
+# -- OpenClaw 新闻同步(外部新闻面输入) --
+# 当 strategy.selector.news_weight > 0 时建议启用
+# OpenClaw 按固定频率抓新闻、分析后写回 QuantBot, selector 直接读 news_summary
 news_sync:
   enable: true                       # 是否允许外部新闻同步
-  provider: "openclaw"              # 预留字段：当前固定为 openclaw
+  provider: "openclaw"              # 预留字段: 当前固定为 openclaw
   interval_hours: 4                  # 每隔多少小时抓取一次新闻
   lookback_hours: 12                 # 回看最近多少小时的重要新闻
   max_results: 12                    # 单次最多分析多少条新闻
-  min_confidence: 0.55               # 低于此置信度仅做摘要，不建议影响策略
+  min_confidence: 0.55               # 低于此置信度仅做摘要, 不建议影响策略
   symbols: ["BTC", "Bitcoin", "ETF", "Fed", "crypto"]
 
-# ── V2.0: AI 情绪分析客户端 ─────────────────────────────────────────────────
-# ⚠️ API Key 已移到 .env 环境变量（AI_API_KEY），请勿在此文件中填写密钥！
-# 环境变量配置：AI_API_KEY / AI_BASE_URL / AI_MODEL
+# -- V2.0: AI 情绪分析客户端 --
+# API Key 已移到 .env 环境变量(AI_API_KEY), 请勿在此文件中填写密钥!
+# 环境变量配置: AI_API_KEY / AI_BASE_URL / AI_MODEL
 ai:
-  # api_key 已移到 .env → AI_API_KEY（安全加固）
+  # api_key 已移到 .env -> AI_API_KEY(安全加固)
   base_url: "https://api.openai.com/v1"   # 或 https://api.deepseek.com/v1
-  model: "gpt-4o-mini"               # 推荐：gpt-4o-mini (便宜) 或 deepseek-chat
+  model: "gpt-4o-mini"               # 推荐: gpt-4o-mini (便宜) 或 deepseek-chat
 
-# ── V2.5: 高级风控参数 ──────────────────────────────────────────────────────
+# -- V2.5: 高级风控参数 --
 risk_v25:
-  # Trailing Stop（追踪止损）
-  trailing_stop_enable: true          # 是否启用追踪止损
-  trailing_stop_trigger: 0.5          # 盈利达 ATR*此值 后激活追踪
-  trailing_stop_distance: 0.8         # 从最优价回撤 ATR*此值 更新 SL
+  # Trailing Stop(追踪止损)
+  trailing_stop_enable: false          # V8.0: 禁用追踪止损(与TM策略的EMA exit冲突)
+  trailing_stop_trigger: 1.5          # 盈利达 ATR*此值 后激活追踪
+  trailing_stop_distance: 1.5         # 从最优价回撤 ATR*此值 更新 SL
 
-  # 时间止损（持仓超时平仓）
+  # 时间止损(持仓超时平仓)
   time_stop_enable: true              # 是否启用时间止损
-  time_stop_bars: 24                  # 最多持仓 N 根K线（1h → 24h）
+  time_stop_bars: 120                  # V8.0: 24->120, TM策略趋势持仓周期更长(1h -> 5天)
 
-  # 动态仓位（根据 regime 置信度和策略胜率调整）
+  # 动态仓位(根据 regime 置信度和策略胜率调整)
   dynamic_position_enable: true       # 是否启用动态仓位
 
-  # V4.0: 回撤保护（分级触发：警告/减仓/熔断）
-  drawdown_warning_pct: 0.03          # 3% 回撤 → 警告（仓位 75%）
-  drawdown_reduce_pct:  0.05          # 5% 回撤 → 减仓（仓位 50%）
-  drawdown_halt_pct:    0.08          # 8% 回撤 → 熔断（停止交易）
+  # V4.0: 回撤保护(分级触发: 警告/减仓/熔断)
+  drawdown_warning_pct: 0.03          # 3% 回撤 -> 警告(仓位 75%)
+  drawdown_reduce_pct:  0.05          # 5% 回撤 -> 减仓(仓位 50%)
+  drawdown_halt_pct:    0.08          # 8% 回撤 -> 熔断(停止交易)
 
-  # V4.0: Equity Curve Trading（资金曲线跌破均线时降权）
+  # V4.0: Equity Curve Trading(资金曲线跌破均线时降权)
   equity_curve_enable:    true        # 是否启用 Equity Curve Trading
   equity_ema_period:      10          # 资金曲线 EMA 周期
   equity_below_ema_scale: 0.6         # 低于 EMA 时仓位缩放至 60%
 
-  # V4.0: 每日最大交易次数限制（防止过度交易）
+  # V4.0: 每日最大交易次数限制(防止过度交易)
   max_daily_trades:  8                # 每日最多开仓 8 次
 
-  # V7.0: 平仓后冷静期（防止插针后快速再开仓）
-  post_close_cooldown_bars:    3      # 任何平仓后至少等待 N 根K线（1h → 3小时）
-  post_stoploss_cooldown_bars: 4      # 止损平仓后等待 N 根K线（1h → 4小时）
-  post_passive_cooldown_bars:  4      # 被动平仓（SL/TP/托管单）后等待 N 根K线
-  post_takeprofit_cooldown_bars: 2    # 止盈平仓后等待 N 根K线（可以更短）
+  # V8.0: 平仓后冷静期(BTC 1h 节奏优化, 缩短冷却加速再开仓)
+  post_close_cooldown_bars:    1      # V8.0: 3->1, 普通平仓后只等1根K线即可再开仓
+  post_stoploss_cooldown_bars: 2      # V8.0: 4->2, 止损后适度冷静即可
+  post_passive_cooldown_bars:  2      # V8.0: 4->2, 被动平仓后等待2根K线
+  post_takeprofit_cooldown_bars: 1    # V8.0: 2->1, 止盈后趋势可能延续快速再进
 
-  # V7.0: 插针/异常波动过滤
-  spike_detect_enable: true           # 是否启用插针检测
-  spike_atr_mult:      2.5            # 单根K线振幅 > ATR × 此值 = 插针
-  spike_wick_ratio:    0.65           # 上下影线占比 > 此值 = 典型插针（影线/(高-低)）
-  spike_cooldown_bars: 3              # 插针后冷静期 K 线数（1h → 3小时）
-  spike_body_max_ratio: 0.35          # 实体占比 < 此值时配合 wick_ratio 判定插针
+  # V8.0: 插针/异常波动过滤(收紧条件, 减少误判)
+  spike_detect_enable: true
+  spike_atr_mult:      3.0            # V8.0: 2.5->3.0, 更极端才判定为插针
+  spike_wick_ratio:    0.75           # V8.0: 0.65->0.75, 影线占比需更高才算插针
+  spike_cooldown_bars: 1              # V8.0: 3->1, 插针后1根K线后即可恢复(约60分钟足够冷静)
+  spike_body_max_ratio: 0.25          # V8.0: 0.35->0.25, 实体占比需更小才配合判定插针
 
-  # V7.0: 再入场确认（平仓后重新开仓需要更强的信号确认）
-  reentry_volatility_settle_mult: 1.5 # 再入场时要求当前ATR < 近期均值 × 此倍数（波动率回落）
-  reentry_require_stable_bars:   2    # 再入场前要求连续 N 根 K 线稳定（无极端波动）
-  reentry_same_direction_block:  true # 是否禁止同方向快速反复追击
-
+  # V8.0: 再入场确认(放宽条件, 加速再入场)
+  reentry_volatility_settle_mult: 2.0 # V8.0: 1.5->2.0, 波动率门槛提高但cooldown缩短更重要
+  reentry_require_stable_bars:   1    # V8.0: 2->1, 只需1根稳定K线即可再入场
+  reentry_same_direction_block:  false # V8.0: 允许同方向快速再开仓(趋势延续场景)

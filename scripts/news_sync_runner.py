@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sys
 import urllib.request
+import yaml
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -22,16 +23,37 @@ if str(PROJECT_ROOT) not in sys.path:
 CONFIG_URL = "http://127.0.0.1:8080/api/news-sync/config"
 
 
+def load_config_directly():
+    """直接加载配置，处理编码问题"""
+    config_path = PROJECT_ROOT / "config.yaml"
+    with open(config_path, 'rb') as f:
+        raw = f.read()
+        try:
+            return yaml.safe_load(raw.decode('utf-8'))
+        except UnicodeDecodeError:
+            return yaml.safe_load(raw.decode('utf-8', errors='ignore'))
+
+
 def main() -> int:
+    # 首先尝试 API 调用
     try:
         with urllib.request.urlopen(CONFIG_URL, timeout=10) as resp:
             cfg = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        print(json.dumps({"ok": False, "stage": "config", "error": str(e)}, ensure_ascii=False))
-        return 1
+        # API 失败，直接加载配置
+        print(f"API call failed: {e}, falling back to direct config loading", file=sys.stderr)
+        cfg = load_config_directly()
+        # 转换为 API 响应格式
+        selector = cfg.get("strategy", {}).get("selector", {})
+        news_sync = cfg.get("news_sync", {})
+        cfg = {
+            "enabled_by_weight": (selector.get("news_weight", 0.0) or 0.0) > 0,
+            "news_weight": selector.get("news_weight", 0.0),
+            "news_sync": news_sync,
+        }
 
     if not cfg.get("enabled_by_weight"):
-        print(json.dumps({"ok": True, "skipped": True, "reason": "news_weight_is_zero"}, ensure_ascii=False))
+        print(json.dumps({"ok": True, "skipped": True, "reason": "news_weight_is_zero", "config": cfg}, ensure_ascii=False))
         return 0
 
     try:
