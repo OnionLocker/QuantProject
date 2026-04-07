@@ -6,18 +6,18 @@ V4 baseline: PF 1.13, ROI +85%, MaxDD 33%, WR 16%, 14 params
 
 V5 upgrades:
   P0: Reduced from 14 to 9 tunable params (hardcode stable ones)
-  P1: Multi-timeframe 闁炽儻鎷� 4H EMA(50) direction filter
-  P2: Volume confirmation 闁炽儻鎷� reversal candle vol > 20-period MA
-  P4: ADX(14) > threshold 闁炽儻鎷� only trade trending markets
-  P5: Exit EMA(30) replaces EMA(20) 闁炽儻鎷� "fast entry, slow exit"
+  P1: Multi-timeframe -- 4H EMA(50) direction filter
+  P2: Volume confirmation -- reversal candle vol > 20-period MA
+  P4: ADX(14) > threshold -- only trade trending markets
+  P5: Exit EMA(30) replaces EMA(20) -- "fast entry, slow exit"
 
-Exit: full-position trend exit (NO split 闁炽儻鎷� split killed avg_win in testing)
+Exit: full-position trend exit (NO split -- split killed avg_win in testing)
 """
 import numpy as np
 import pandas as pd
 from strategy.base import BaseStrategy
 
-# 闁冲厜鍋撻柍鍏夊亾 Hardcoded constants (stable, not worth tuning) 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋�
+# -- Hardcoded constants (stable, not worth tuning) --------------------
 _ATR_PERIOD        = 14
 _PULLBACK_LOOKBACK = 5
 _MAX_TREND_DIST    = 6.0
@@ -121,7 +121,7 @@ class TrendPullbackStrategy(BaseStrategy):
         df['adx']       = _calc_adx(H, L, C, _ATR_PERIOD)
         df['vol_ma']    = V.rolling(_VOL_MA_PERIOD).mean()
 
-        # MTF: 4H EMA 闁炽儻鎷� shift(1) to prevent look-ahead
+        # MTF: 4H EMA -- shift(1) to prevent look-ahead
         df_4h = df.resample('4h').agg({
             'open': 'first', 'high': 'max', 'low': 'min',
             'close': 'last', 'volume': 'sum',
@@ -263,7 +263,7 @@ class TrendPullbackStrategy(BaseStrategy):
 
 
 # =========================================================================
-# Backtest 闁炽儻鎷� full-position trend exit via EMA(30)
+# Backtest -- full-position trend exit via EMA(30)
 # =========================================================================
 
 def run_pullback_backtest(
