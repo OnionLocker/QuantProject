@@ -14,7 +14,10 @@ nohup.out
 
 # ── 历史数据缓存 ──────────────────────────────────────────────────────────
 data/data_*.csv
-data/cache/
+data/cache/*
+# 例外：开发用 seed 数据随仓库分发，clone 后 fetch_history_range 直接命中缓存
+!data/cache/.gitkeep
+!data/cache/BTC-USDT-USDT_4h.csv
 history.csv
 
 # ── 迁移备份 ──────────────────────────────────────────────────────────────
